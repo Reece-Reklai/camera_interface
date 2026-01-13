@@ -37,7 +37,6 @@ class ThreadedCapture:
         self.cap.release()
 
 # CORRECT USAGE
-frameList = []
 cap = ThreadedCapture(4, cv2.CAP_V4L2)  # Use V4L2 on Linux
 cap.start()
 fps = cap.cap.get(cv2.CAP_PROP_FPS)
@@ -48,10 +47,6 @@ try:
     while True:
         ret, frame = cap.read()
         if not ret: continue
-        frameList.append(frame)
-        if len(frameList) < 4:
-            continue
-        frameList.clear()
         cv2.imshow('Feed', frame)
         if cv2.waitKey(1) == ord('q'): break
 finally:
