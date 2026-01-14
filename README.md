@@ -9,7 +9,7 @@ chmod +x install.sh
 ./install.sh
 
 # 2. Run
-./camera_grid.py
+./main.py
 
 Controls
 
