@@ -23,45 +23,36 @@ Controls
 
     Ctrl+Q = quit
 
-Install (manual)
+## Install (manual)
 
-bash
+### bash
 pip install PyQt6 opencv-python qdarkstyle imutils cv2-enumerate-cameras
 chmod +x camera_grid.py
 
 Linux only: sudo usermod -a -G video $USER (then logout/login)
 Files
 
-text
+### Project Structure: 
+
 ├── camera_grid.py     # Main app
 ├── install.sh         # Setup script
 ├── requirements.txt   # pip install -r
 └── README.md          # This file
 
-Debug
+##### Terminal prints debug activities:
 
-Terminal shows all activity:
+-   Found 2 cameras: [0, 1]
+-   Press cam0_140123456
+-   ENTER swap cam0_140123456  
+-   SWAP cam0_140123456 ↔ cam1_140123789
 
-text
-DEBUG: Found 2 cameras: [0, 1]
-DEBUG: Press cam0_140123456
-DEBUG: ENTER swap cam0_140123456  
-DEBUG: SWAP cam0_140123456 ↔ cam1_140123789
+###### Require Packages Installments:
 
-Troubleshooting
-Issue	Solution
-No cameras	ls /dev/video* - plug in USB cameras
-Permissions	sudo usermod -a -G video $USER
-Import error	pip install -r requirements.txt
-Won't quit	Ctrl+Q or Ctrl+C
-Requirements
-
-text
-PyQt6
-opencv-python  
-qdarkstyle
-imutils
-cv2-enumerate-cameras
+>> PyQt6
+>> opencv-python  
+>> qdarkstyle
+>> imutils
+>> cv2-enumerate-cameras
 
 Tested
 
