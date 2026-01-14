@@ -48,11 +48,11 @@ Files
 
 ###### Require Packages Installments:
 
->> PyQt6
->> opencv-python  
->> qdarkstyle
->> imutils
->> cv2-enumerate-cameras
+**PyQt6**
+**opencv-python**
+**qdarkstyle**
+**imutils**
+**cv2-enumerate-cameras**
 
 Tested
 
