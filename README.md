@@ -29,7 +29,7 @@ sudo apt install python3 python3-venv python3-pip
 - Look at your main package manager (apt, dnf, pacman, yay . . .)
 
 # 1. Install
->> Verify: python3 --version
+## Verify: python3 --version
 ##### Ubuntu/Linux - Recommended (isolated environment)
 -   Create isolated Python environment -> Activate it -> Install package safely isolated from systems
 
