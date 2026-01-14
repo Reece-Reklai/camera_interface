@@ -5,32 +5,32 @@ Fullscreen multi n-camera setup display with click-to-fullscreen and hold-to-swa
 # Quick Start
 
 ## Prerequisites - Install Python First
->> **Windows**
+# **Windows**
 
-### Download from python.org/downloads/windows
-### Check "Add Python to PATH" during install
+##### Download from python.org/downloads/windows
+##### Check "Add Python to PATH" during install
 
->> **macOS**
+# **macOS**
 
-### Option 1: Official installer
+##### Option 1: Official installer
 -   Download from python.org/downloads/macos
 
-### Option 2: Homebrew (recommended)
+##### Option 2: Homebrew (recommended)
 ```
 brew install python3
 ```
 
->> **Ubuntu Example**
+# **Ubuntu Example**
 ```
 sudo apt update
 sudo apt install python3 python3-venv python3-pip
 ```
-### Other linux Distros
+# Other linux Distros
 - Look at your main package manager (apt, dnf, pacman, yay . . .)
 
 # 1. Install
 >> Verify: python3 --version
-## Ubuntu/Linux - Recommended (isolated environment)
+##### Ubuntu/Linux - Recommended (isolated environment)
 -   Create isolated Python environment -> Activate it -> Install package safely isolated from systems
 
 ```
@@ -47,7 +47,7 @@ pip install --upgrade pip
 pip install PyQt6 opencv-python qdarkstyle imutils cv2-enumerate-cameras
 ```
 
-## Run (source if you havent before running)
+# 2. Run (source if you havent before running)
 ```
 source camera_env/bin/activate
 python main.py
