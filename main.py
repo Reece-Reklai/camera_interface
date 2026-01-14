@@ -1,326 +1,425 @@
-from PyQt6 import QtCore, QtGui, QtWidgets
-from PyQt6.QtCore import Qt
-from cv2_enumerate_cameras import enumerate_cameras
-import qdarkstyle
-from threading import Thread
-from collections import deque
-import time
-import sys
-import cv2
-import imutils
-import signal
-import atexit
+#!/usr/bin/env python3
+"""
+Multi-camera grid viewer - COMPLETE PRODUCTION VERSION.
+Single click = toggle fullscreen. Hold 400ms = swap mode.
+"""
 
-class CameraWidget(QtWidgets.QWidget):
-    # Camera display widget with fullscreen and swap
-    
-    def __init__(self, width, height, stream_link=0, aspect_ratio=False, parent=None, deque_size=1):
+# === IMPORTS - What each library does ===
+print("DEBUG: Loading libraries...")
+from PyQt6 import QtCore, QtGui, QtWidgets  # GUI framework - makes windows, buttons
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QThread, QTimer  # Core Qt features
+import sys  # System utilities - exit cleanly
+import cv2  # OpenCV - reads camera video frames
+import time  # Timing - measure hold duration
+import traceback  # Error reporting - show crashes clearly
+from collections import deque  # Ring buffer - keeps last 4 frames
+from cv2_enumerate_cameras import enumerate_cameras  # Finds all /dev/video devices
+import qdarkstyle  # Dark theme - looks professional
+import imutils  # Image resizing utilities
+import atexit  # Runs cleanup code when program exits
+import signal  # Handles Ctrl+C gracefully
+print("DEBUG: All libraries loaded")
+
+# === CAMERA THREAD - Reads video without freezing GUI ===
+class CaptureWorker(QThread):
+    """
+    Runs in background thread. Reads camera frames every 10ms.
+    Emits new frames to main thread via signals (thread-safe).
+    Auto-reconnects if camera disconnects.
+    """
+    frame_ready = pyqtSignal(object)  # Sends frame to GUI
+    status_changed = pyqtSignal(bool)  # Online/offline status
+
+    def __init__(self, stream_link, parent=None, maxlen=4):
         super().__init__(parent)
+        self.stream_link = stream_link  # Camera ID (0, 1, 2...)
+        self._running = True  # Stop flag
+        self._reconnect_backoff = 1.0  # Wait longer each reconnect attempt
+        self._cap = None  # OpenCV camera object
+        self.buffer = deque(maxlen=maxlen)  # Keeps last 4 frames
+
+    def run(self):
+        """Infinite loop - grab frames until stopped."""
+        print(f"DEBUG: Camera {self.stream_link} thread started")
+        while self._running:
+            try:
+                # Reopen camera if disconnected
+                if self._cap is None or not self._cap.isOpened():
+                    self._open_capture()
+                    if not (self._cap and self._cap.isOpened()):
+                        # Failed - wait longer next time (exponential backoff)
+                        time.sleep(self._reconnect_backoff)
+                        self._reconnect_backoff = min(self._reconnect_backoff * 1.5, 10.0)
+                        continue
+                    self.status_changed.emit(True)  # Tell GUI: "I'm back online"
+
+                # Read one frame
+                status, frame = self._cap.read()
+                if not status or frame is None:
+                    self._close_capture()
+                    self.status_changed.emit(False)
+                    continue
+
+                # Send frame to GUI thread
+                self.buffer.append(frame)
+                self.frame_ready.emit(frame)
+                time.sleep(0.01)  # Don't overload CPU
+                
+            except Exception:
+                traceback.print_exc()
+                time.sleep(0.5)
         
-        # Video buffer and sizes
-        self.deque = deque(maxlen=deque_size)
-        self.offset = 16
-        self.screen_width = width - self.offset
-        self.screen_height = height - self.offset
+        self._close_capture()
+
+    def _open_capture(self):
+        """Try V4L2 first (Linux USB cameras), then any backend."""
+        try:
+            for api in [cv2.CAP_V4L2, cv2.CAP_ANY]:
+                cap = cv2.VideoCapture(self.stream_link, api)
+                if cap.isOpened():
+                    # MJPG = lower CPU usage
+                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+                    self._cap = cap
+                    return
+                cap.release()
+        except:
+            pass
+
+    def _close_capture(self):
+        """Safely close camera."""
+        try:
+            if self._cap:
+                self._cap.release()
+                self._cap = None
+        except:
+            pass
+
+    def stop(self):
+        """Stop thread cleanly."""
+        self._running = False
+        self.wait(timeout=2000)  # Wait up to 2 seconds
+        self._close_capture()
+
+# === CAMERA WIDGET - Each camera lives here ===
+class CameraWidget(QtWidgets.QWidget):
+    """
+    One widget per camera. Shows video, handles clicks, fullscreen, swapping.
+    Thread-safe - updates only happen on main GUI thread.
+    """
+    hold_threshold_ms = 400  # Hold this long to enter swap mode
+
+    def __init__(self, width, height, stream_link=0, aspect_ratio=False, parent=None, buffer_size=4):
+        super().__init__(parent)
+        print(f"DEBUG: Creating camera {stream_link}")
+        
+        # Widget settings
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setMouseTracking(True)  # Track mouse position
+        
+        # Sizing
+        self.screen_width = max(1, width)
+        self.screen_height = max(1, height)
         self.maintain_aspect_ratio = aspect_ratio
-        self.camera_stream_link = stream_link
-        self.online = False
-        self.capture = None
-        self._threads_running = True
+        self.camera_stream_link = stream_link  # Which /dev/video?
         
-        # UI state
+        # Unique ID - prevents "wrong camera" bug
+        self.widget_id = f"cam{stream_link}_{id(self)}"
+
+        # State flags
         self.is_fullscreen = False
-        self.original_parent = parent
-        self.grid_position = None
-        self.selected_for_swap = False
-        self.hold_start_time = 0
-        self.is_holding = False
-        self.hold_threshold = 400  # ms for swap mode
-        self.click_parent = None   # Fix swap mode race condition
-        
-        # Styles
+        self.grid_position = None  # (row, col) in grid
+        self._saved_parent = None  # Where we were before fullscreen
+        self._saved_position = None
+        self._press_widget_id = None  # Locks exact widget during click
+        self._press_time = 0  # Click timing
+        self._grid_parent = None  # Layout parent at press time
+
+        # Colors
         self.normal_style = "border: 2px solid #555; background: black;"
         self.swap_ready_style = "border: 4px solid #FFFF00; background: black;"
-        
+        self.setStyleSheet(self.normal_style)
+        self.setObjectName(self.widget_id)
+
+        # Video display label
+        self.video_label = QtWidgets.QLabel(self)
+        self.video_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
+                                       QtWidgets.QSizePolicy.Policy.Expanding)
+        self.video_label.setMinimumSize(1, 1)
+        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.video_label.setScaledContents(True)  # Auto-fit video
+        self.video_label.setMouseTracking(True)
+        self.video_label.setObjectName(f"{self.widget_id}_label")
+
+        # Layout - video fills entire widget
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.video_label)
+
         # FPS counter
         self.frame_count = 0
         self.prev_time = time.time()
-        
-        # Create video label
-        self.video_frame = None
-        self._setup_video_frame()
-        
-        # Start camera threads
-        self.test_and_init_camera()
-        self.frame_thread = Thread(target=self._safe_get_frame, daemon=True)
-        self.frame_thread.start()
-        self.display_thread = Thread(target=self._safe_update_display, daemon=True)
-        self.display_thread.start()
 
-    def _setup_video_frame(self):
-        # Setup QLabel for video display
-        self.video_frame = QtWidgets.QLabel(self)
-        self.video_frame.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
-        self.video_frame.setMinimumSize(1, 1)
-        self.reset_style()
-        self.video_frame.setMouseTracking(True)
-        self.video_frame.mousePressEvent = self.on_mouse_press
-        self.video_frame.mouseReleaseEvent = self.on_mouse_release
-        self.video_frame.setScaledContents(True)
+        # Start background camera thread
+        self.worker = CaptureWorker(stream_link, parent=self, maxlen=buffer_size)
+        self.worker.frame_ready.connect(self.on_frame)  # Thread → GUI
+        self.worker.status_changed.connect(self.on_status_changed)
+        self.worker.start()
 
-    def cleanup(self):
-        # Stop threads and release camera
-        self._threads_running = False
-        if self.capture:
-            self.capture.release()
-            self.capture = None
-        self.online = False
-        self.deque.clear()
+        # FPS timer - runs on main thread
+        self.ui_timer = QTimer(self)
+        self.ui_timer.setInterval(1000)
+        self.ui_timer.timeout.connect(self._print_fps)
+        self.ui_timer.start()
 
-    def reset_style(self):
-        # Reset border to normal
-        if self.video_frame:
-            self.video_frame.setStyleSheet(self.normal_style)
-        self.selected_for_swap = False
+        # Mouse event handling - CRITICAL for correct behavior
+        self.installEventFilter(self)
+        self.video_label.installEventFilter(self)
+        print(f"DEBUG: Widget {self.widget_id} ready")
 
-    def on_mouse_press(self, event):
-        # Store parent at press time (fixes swap race condition)
+    def eventFilter(self, obj, event):
+        """
+        Catches mouse events BEFORE they reach normal handlers.
+        obj = self or video_label → handle our events only.
+        """
+        if obj not in (self, self.video_label):
+            return super().eventFilter(obj, event)
+            
+        if event.type() == QtCore.QEvent.Type.MouseButtonPress:
+            return self._on_mouse_press(event)
+        if event.type() == QtCore.QEvent.Type.MouseButtonRelease:
+            return self._on_mouse_release(event)
+        return super().eventFilter(obj, event)
+
+    def _on_mouse_press(self, event):
+        """Mouse DOWN - record which widget and when."""
         try:
             if event.button() == QtCore.Qt.MouseButton.LeftButton:
-                self.click_parent = self.original_parent or self.parent()
-                self.hold_start_time = time.time() * 1000
-                self.is_holding = True
+                # LOCK IDENTITY - prevents wrong camera bug
+                self._press_time = time.time() * 1000.0
+                self._press_widget_id = self.widget_id  # Exact widget
+                self._grid_parent = self.parent()  # Layout at press time
+                print(f"DEBUG: Press {self.widget_id}")
             elif event.button() == QtCore.Qt.MouseButton.RightButton:
                 self.toggle_fullscreen()
-        except:
-            pass
+        except Exception:
+            traceback.print_exc()
+        return True  # STOP EVENT - no bubbling to parents
 
-    def on_mouse_release(self, event):
-        # Handle quick click (fullscreen) vs long hold (swap)
+    def _on_mouse_release(self, event):
+        """
+        Mouse UP - 4 possible outcomes based on priority:
+        1. Click selected camera → clear swap mode
+        2. Other camera selected → swap positions  
+        3. Hold 400ms → enter swap mode
+        4. Short click → fullscreen toggle
+        """
         try:
-            if not (event.button() == QtCore.Qt.MouseButton.LeftButton and self.is_holding):
-                return
-                
-            hold_time = (time.time() * 1000) - self.hold_start_time
-            parent = self.click_parent
-            if not parent:
-                return
-                
-            if hasattr(parent, 'selected_camera') and parent.selected_camera:
-                # Swap with selected camera
-                if parent.selected_camera != self:
-                    self.do_swap(parent.selected_camera, self)
-                parent.selected_camera.reset_style()
-                parent.selected_camera = None
-                print(f"SWAP OK")
-            elif hold_time >= self.hold_threshold:
-                # Enter swap mode
-                parent.selected_camera = self
-                if self.video_frame:
-                    self.video_frame.setStyleSheet(self.swap_ready_style)
-                print(f"CAM {self.camera_stream_link} SWAP READY")
-            else:
-                # Quick click = fullscreen
-                self.toggle_fullscreen()
-                
-            self.is_holding = False
-            self.click_parent = None
-        except:
-            pass
+            # Wrong widget? Ignore (safety check)
+            if (event.button() != QtCore.Qt.MouseButton.LeftButton or 
+                not self._press_widget_id or self._press_widget_id != self.widget_id):
+                return True
 
-    def do_swap(self, source, target):
-        # Swap grid positions between two cameras
+            hold_time = (time.time() * 1000.0) - self._press_time
+            print(f"DEBUG: Release {self.widget_id}, hold={hold_time:.0f}ms")
+
+            # No swap manager? Default to fullscreen
+            swap_parent = self._grid_parent
+            if not swap_parent or not hasattr(swap_parent, 'selected_camera'):
+                self._reset_mouse_state()
+                self.toggle_fullscreen()
+                return True
+
+            # PRIORITY 1: Click SELECTED camera → clear swap
+            if swap_parent.selected_camera == self:
+                print(f"DEBUG: Clear swap {self.widget_id}")
+                swap_parent.selected_camera = None
+                self.reset_style()
+                self._reset_mouse_state()
+                return True
+
+            # PRIORITY 2: Swap with OTHER selected camera
+            if (swap_parent.selected_camera and 
+                swap_parent.selected_camera != self and 
+                not self.is_fullscreen):
+                other = swap_parent.selected_camera
+                print(f"DEBUG: SWAP {other.widget_id} ↔ {self.widget_id}")
+                self.do_swap(other, self, swap_parent)
+                other.reset_style()
+                swap_parent.selected_camera = None
+                self._reset_mouse_state()
+                return True
+
+            # PRIORITY 3: Long hold → enter swap mode
+            if hold_time >= self.hold_threshold_ms and not self.is_fullscreen:
+                print(f"DEBUG: ENTER swap {self.widget_id}")
+                swap_parent.selected_camera = self
+                self.video_label.setStyleSheet(self.swap_ready_style)
+                self._reset_mouse_state()
+                return True
+
+            # PRIORITY 4: Short click → fullscreen
+            print(f"DEBUG: Short click fullscreen {self.widget_id}")
+            self.toggle_fullscreen()
+            
+        except Exception:
+            traceback.print_exc()
+        finally:
+            self._reset_mouse_state()
+        return True
+
+    def _reset_mouse_state(self):
+        """Clear temporary mouse tracking."""
+        self._press_time = 0
+        self._press_widget_id = None
+        self._grid_parent = None
+
+    def do_swap(self, source, target, layout_parent):
+        """
+        Atomic swap of two widgets in grid layout.
+        Updates grid_position so fullscreen works correctly.
+        """
         try:
             source_pos = getattr(source, 'grid_position', None)
             target_pos = getattr(target, 'grid_position', None)
-            if not source_pos or not target_pos:
+            if source_pos is None or target_pos is None:
+                print(f"DEBUG: Swap failed - missing positions")
                 return
-                
-            layout_parent = getattr(source, 'original_parent', None) or getattr(source, 'click_parent', None)
-            if not layout_parent or not hasattr(layout_parent, 'layout'):
-                return
-                
+
             layout = layout_parent.layout()
-            layout.removeWidget(source.video_frame)
-            layout.removeWidget(target.video_frame)
-            layout.addWidget(target.video_frame, *source_pos)
-            layout.addWidget(source.video_frame, *target_pos)
-            
-            source.grid_position = target_pos
-            target.grid_position = source_pos
-        except:
-            pass
+            # Remove both, add swapped - ATOMIC operation
+            layout.removeWidget(source)
+            layout.removeWidget(target)
+            layout.addWidget(target, *source_pos)
+            layout.addWidget(source, *target_pos)
+            # Update memory
+            source.grid_position, target.grid_position = target_pos, source_pos
+            print(f"DEBUG: Swap complete {source.widget_id} ↔ {target.widget_id}")
+        except Exception:
+            traceback.print_exc()
 
     def toggle_fullscreen(self):
-        # Switch fullscreen on/off
+        """Enter OR exit fullscreen."""
         if self.is_fullscreen:
             self.exit_fullscreen()
         else:
             self.go_fullscreen()
 
     def go_fullscreen(self):
-        # Remove from grid, make fullscreen window
-        if self.is_fullscreen or not self.video_frame:
+        """Detach widget, make fullscreen window."""
+        if self.is_fullscreen:
             return
         try:
-            self.original_parent = self.video_frame.parent()
-            if not self.original_parent or not hasattr(self.original_parent, 'layout'):
-                return
-                
-            layout = self.original_parent.layout()
-            # Find current grid position
-            for row in range(layout.rowCount()):
-                for col in range(layout.columnCount()):
-                    item = layout.itemAtPosition(row, col)
-                    if item and item.widget() == self.video_frame:
-                        self.grid_position = (row, col)
-                        break
+            print(f"DEBUG: {self.widget_id} → fullscreen")
+            # Remember original camera widget configuration
+            self._saved_parent = self.parent()
+            self._saved_position = getattr(self, 'grid_position', None)
             
-            layout.removeWidget(self.video_frame)
-            self.video_frame.setParent(None)
-            self.video_frame.setWindowFlags(QtCore.Qt.WindowType.Window | QtCore.Qt.WindowType.FramelessWindowHint)
-            self.video_frame.setWindowState(QtCore.Qt.WindowState.WindowFullScreen)
-            self.video_frame.show()
+            if self._saved_parent and self._saved_parent.layout():
+                self._saved_parent.layout().removeWidget(self)
+
+            # Become standalone fullscreen window
+            self.setParent(None)
+            self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+            self.showFullScreen()
             self.is_fullscreen = True
-        except:
-            pass
+        except Exception:
+            traceback.print_exc()
 
     def exit_fullscreen(self):
-        # Return to grid position
-        if not self.is_fullscreen or not self.video_frame:
+        """Return to exact grid position."""
+        if not self.is_fullscreen:
             return
         try:
-            self.video_frame.setWindowFlags(QtCore.Qt.WindowType.Widget)
-            self.video_frame.setWindowState(QtCore.Qt.WindowState.WindowNoState)
+            print(f"DEBUG: {self.widget_id} ← grid[{self._saved_position}]")
             
-            if not self.original_parent or not hasattr(self.original_parent, 'layout'):
-                return
-                
-            self.video_frame.setParent(self.original_parent)
-            layout = self.original_parent.layout()
-            if self.grid_position:
-                layout.addWidget(self.video_frame, *self.grid_position)
+            # Must reset flags BEFORE reparenting
+            self.setWindowFlags(Qt.WindowType.Widget)
+            self.show()  # Show as normal widget first
             
-            self.video_frame.show()
+            # Return to exact spot
+            if self._saved_parent and self._saved_position:
+                self.setParent(self._saved_parent)
+                layout = self._saved_parent.layout()
+                if layout:
+                    layout.addWidget(self, *self._saved_position)
+            
             self.is_fullscreen = False
+            
             # Restore main window fullscreen
-            main_window = self.original_parent.window()
-            if main_window:
-                main_window.showFullScreen()
-        except:
-            pass
+            if self._saved_parent and self._saved_parent.window():
+                self._saved_parent.window().showFullScreen()
+        except Exception:
+            traceback.print_exc()
 
-    def test_and_init_camera(self):
-        # Try V4L2 then ANY backend
+    @pyqtSlot(object)
+    def on_frame(self, frame):
+        """
+        Called by worker thread signal. Runs on main GUI thread.
+        Converts OpenCV frame → Qt image → display.
+        """
         try:
-            for api in [cv2.CAP_V4L2, cv2.CAP_ANY]:
-                self.capture = cv2.VideoCapture(self.camera_stream_link, api)
-                if self.capture.isOpened():
-                    self.capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
-                    self.online = True
-                    print(f"CAM {self.camera_stream_link} OK")
-                    return
-            print(f"CAM {self.camera_stream_link} FAILED")
-        except:
-            pass
-
-    def _safe_spin(self, seconds):
-        # Thread-safe processEvents
-        try:
-            time_end = time.time() + seconds
-            while time.time() < time_end and self._threads_running:
-                QtWidgets.QApplication.processEvents()
-        except:
-            pass
-
-    def _safe_get_frame(self):
-        # Capture frames from camera
-        while self._threads_running:
-            try:
-                if self.capture and self.capture.isOpened() and self.online:
-                    status, frame = self.capture.read()
-                    if status and frame is not None:
-                        self.deque.append(frame)
-                    else:
-                        self.capture.release()
-                        self.capture = None
-                        self.online = False
-                else:
-                    if self._threads_running:
-                        print(f'RECONNECT {self.camera_stream_link}')
-                        self.test_and_init_camera()
-                        self._safe_spin(2)
-                self._safe_spin(0.001)
-            except:
-                self._safe_spin(0.1)
-
-    def _safe_update_display(self):
-        # Update video display 30fps
-        while self._threads_running:
-            try:
-                if self.online and self.deque:
-                    self.set_frame()
-                    self.update_fps()
-                elif self.video_frame:
-                    self.video_frame.clear()
-                self._safe_spin(0.033)
-            except:
-                self._safe_spin(0.1)
-
-    def update_fps(self):
-        # Print FPS every second
-        try:
-            self.frame_count += 1
-            current_time = time.time()
-            if current_time - self.prev_time >= 1.0:
-                fps = self.frame_count / (current_time - self.prev_time)
-                print(f"CAM {self.camera_stream_link} FPS {fps:.1f}")
-                self.frame_count = 0
-                self.prev_time = current_time
-        except:
-            pass
-
-    def set_frame(self):
-        # Convert OpenCV frame to Qt pixmap
-        try:
-            if (not self.online or not self.deque or not hasattr(self, 'video_frame') or 
-                not self.video_frame or not self.video_frame.isEnabled()):
-                return
-                
-            frame = self.deque[-1]
             if frame is None:
                 return
-            
-            # Resize for fullscreen or grid
+                
+            # Resize to fit
             if self.is_fullscreen:
-                w, h = self.video_frame.width(), self.video_frame.height()
+                w, h = self.width(), self.height()
                 if w > 0 and h > 0:
-                    frame = cv2.resize(frame, (w, h))
+                    frame_resized = cv2.resize(frame, (w, h))
                 else:
                     return
-            elif self.maintain_aspect_ratio:
-                frame = imutils.resize(frame, width=self.screen_width)
             else:
-                frame = cv2.resize(frame, (self.screen_width, self.screen_height))
-            
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame_resized = cv2.resize(frame, (self.screen_width, self.screen_height))
+
+            # BGR → RGB, then Qt image format
+            frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
             h, w, ch = frame_rgb.shape
             bytes_per_line = ch * w
-            
-            self.img = QtGui.QImage(frame_rgb.data, w, h, bytes_per_line, QtGui.QImage.Format.Format_RGB888)
-            self.pix = QtGui.QPixmap.fromImage(self.img)
-            
-            if self.video_frame and self.video_frame.isEnabled():
-                self.video_frame.setPixmap(self.pix)
+            img = QtGui.QImage(frame_rgb.data.tobytes(), w, h, bytes_per_line, 
+                             QtGui.QImage.Format.Format_RGB888)
+            pix = QtGui.QPixmap.fromImage(img)
+            self.video_label.setPixmap(pix)
+            self.frame_count += 1  # For FPS
+        except Exception:
+            pass
+
+    @pyqtSlot(bool)
+    def on_status_changed(self, online):
+        """Camera connected/disconnected."""
+        if online:
+            self.setStyleSheet(self.normal_style)
+        else:
+            self.video_label.clear()  # Remove stale frame
+
+    def reset_style(self):
+        """Remove yellow swap border."""
+        self.video_label.setStyleSheet("")
+        self.setStyleSheet(self.normal_style)
+
+    def _print_fps(self):
+        """Print FPS every second."""
+        try:
+            now = time.time()
+            elapsed = now - self.prev_time
+            if elapsed >= 1.0:
+                fps = self.frame_count / elapsed if elapsed > 0 else 0.0
+                print(f"DEBUG: {self.widget_id} FPS: {fps:.1f}")
+                self.frame_count = 0
+                self.prev_time = now
         except:
             pass
 
-    def get_video_frame(self):
-        # Return video QLabel for layout
-        return getattr(self, 'video_frame', None)
+    def cleanup(self):
+        """Stop camera thread safely."""
+        try:
+            if hasattr(self, 'worker') and self.worker:
+                self.worker.stop()
+        except:
+            pass
 
+# === HELPER FUNCTIONS ===
 def get_smart_grid(num_cameras):
-    # Calculate optimal grid layout
+    """Calculate best rows/cols for N cameras. Max 9."""
     if num_cameras <= 1: return 1, 1
     elif num_cameras == 2: return 1, 2
     elif num_cameras == 3: return 1, 3
@@ -333,103 +432,101 @@ def get_smart_grid(num_cameras):
         return rows, cols
 
 def find_working_cameras():
-    # Test camera indices for working devices
-    print("SCAN CAMERAS")
-    working_cameras = []
-    test_indices = [0, 1, 2, 3, 4] + [cam.index for cam in enumerate_cameras(cv2.CAP_V4L2)]
-    
+    """Test /dev/video0-4 + V4L2 devices."""
+    working = []
+    try:
+        enumerated = [cam.index for cam in enumerate_cameras(cv2.CAP_V4L2)]
+    except:
+        enumerated = []
+    test_indices = [0,1,2,3,4] + enumerated
     for i in test_indices:
-        if i in working_cameras: continue
+        if i in working: continue
         try:
             cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
             if cap.isOpened():
-                working_cameras.append(i)
-                cap.release()
-                print(f"FOUND /dev/video{i}")
-            else:
+                working.append(i)
                 cap.release()
         except:
             pass
-    return working_cameras
+    return working
 
-def emergency_cleanup(camera_widgets):
-    # Close all cameras on exit
-    print("CLEANUP")
-    for widget in camera_widgets[:]:
+def safe_cleanup(widgets):
+    """Stop all camera threads."""
+    print("DEBUG: Cleaning all cameras")
+    for w in widgets[:]:
         try:
-            widget._threads_running = False
-            if widget.capture:
-                widget.capture.release()
+            w.cleanup()
         except:
             pass
-    camera_widgets.clear()
 
-if __name__ == "__main__":
+# === MAIN APPLICATION ===
+def main():
+    """Create fullscreen grid of working cameras."""
+    print("DEBUG: Starting camera grid app")
     app = QtWidgets.QApplication(sys.argv)
     camera_widgets = []
-    
-    # Handle Ctrl+C
-    def signal_handler(sig, frame):
-        emergency_cleanup(camera_widgets)
+
+    # Clean shutdown handlers
+    def on_sigint(sig, frame):
+        safe_cleanup(camera_widgets)
         sys.exit(0)
-    
-    signal.signal(signal.SIGINT, signal_handler)
-    atexit.register(lambda: emergency_cleanup(camera_widgets))
-    
+    signal.signal(signal.SIGINT, on_sigint)
+    atexit.register(lambda: safe_cleanup(camera_widgets))
+
+    # Dark theme (fallback to Fusion)
     try:
-        # Dark theme fallback
-        try:
-            app.setStyleSheet(qdarkstyle.load_stylesheet_pyqt6())
-        except:
-            app.setStyle(QtWidgets.QStyleFactory.create("Fusion"))
-        
-        # Main frameless window
-        mw = QtWidgets.QMainWindow()
-        mw.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint)
-        
-        central_widget = QtWidgets.QWidget()
-        central_widget.selected_camera = None  # For swap mode
-        mw.setCentralWidget(central_widget)
-        mw.showFullScreen()
-        
-        # Grid layout
-        screen = app.primaryScreen().availableGeometry()
-        working_cameras = find_working_cameras()
-        
-        layout = QtWidgets.QGridLayout(central_widget)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
-        
-        if working_cameras:
-            rows, cols = get_smart_grid(len(working_cameras))
-            widget_width = screen.width() // cols
-            widget_height = screen.height() // rows
-            
-            # Create camera widgets
-            for cam_index in working_cameras[:9]:
-                cam_widget = CameraWidget(widget_width, widget_height, cam_index, parent=central_widget)
-                camera_widgets.append(cam_widget)
-
-            print(f"{len(camera_widgets)} cams {rows}x{cols}")
-            
-            # Add to grid
-            for i, cam_widget in enumerate(camera_widgets):
-                row = i // cols
-                col = i % cols
-                cam_widget.grid_position = (row, col)
-                layout.addWidget(cam_widget.get_video_frame(), row, col)
-        else:
-            label = QtWidgets.QLabel("NO CAMERAS")
-            label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            label.setStyleSheet("font-size: 24px; color: #888;")
-            layout.addWidget(label, 0, 0)
-        
-        # Cleanup and quit
-        app.aboutToQuit.connect(lambda: emergency_cleanup(camera_widgets))
-        QtGui.QShortcut(QtGui.QKeySequence('Ctrl+Q'), mw, lambda: (emergency_cleanup(camera_widgets), app.quit()))
-        
-        sys.exit(app.exec())
-        
+        app.setStyleSheet(qdarkstyle.load_stylesheet_pyqt6())
     except:
-        emergency_cleanup(camera_widgets)
+        app.setStyle(QtWidgets.QStyleFactory.create("Fusion"))
 
+    # Frameless fullscreen main window
+    mw = QtWidgets.QMainWindow()
+    mw.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint)
+    central_widget = QtWidgets.QWidget()
+    central_widget.selected_camera = None  # Swap mode manager
+    mw.setCentralWidget(central_widget)
+    mw.showFullScreen()
+
+    # Screen size and camera detection
+    screen = app.primaryScreen().availableGeometry()
+    working_cameras = find_working_cameras()
+    print(f"DEBUG: Found {len(working_cameras)} cameras")
+
+    # Grid layout
+    layout = QtWidgets.QGridLayout(central_widget)
+    layout.setContentsMargins(10,10,10,10)
+    layout.setSpacing(10)
+
+    if working_cameras:
+        rows, cols = get_smart_grid(len(working_cameras))
+        widget_width = screen.width() // cols
+        widget_height = screen.height() // rows
+        
+        # Create widgets (max 9)
+        for cam_index in working_cameras[:9]:
+            cw = CameraWidget(widget_width, widget_height, cam_index, parent=central_widget)
+            camera_widgets.append(cw)
+
+        # Position in grid
+        for i, cw in enumerate(camera_widgets):
+            row = i // cols
+            col = i % cols
+            cw.grid_position = (row, col)
+            layout.addWidget(cw, row, col)
+    else:
+        # No cameras message
+        label = QtWidgets.QLabel("NO CAMERAS FOUND")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet("font-size: 24px; color: #888;")
+        layout.addWidget(label, 0, 0)
+
+    # Quit handlers
+    app.aboutToQuit.connect(lambda: safe_cleanup(camera_widgets))
+    QtGui.QShortcut(QtGui.QKeySequence('Ctrl+Q'), mw, 
+                   lambda: (safe_cleanup(camera_widgets), app.quit()))
+
+    print("DEBUG: Short click=fullscreen toggle. Hold 400ms=swap mode. Ctrl+Q=quit.")
+    sys.exit(app.exec())
+
+if __name__ == "__main__":
+    main()
