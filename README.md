@@ -1,6 +1,6 @@
-Camera Grid Viewer
+# **Camera Grid Viewer**
 
-Fullscreen multi n-camera setup display with click-to-fullscreen and hold-to-swap.
+> Fullscreen multi n-camera setup display with click-to-fullscreen and hold-to-swap.
 
 # Quick Start
 
