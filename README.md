@@ -5,9 +5,10 @@ Fullscreen multi n-camera setup display with click-to-fullscreen and hold-to-swa
 # Quick Start
 
 # 1. Install
->> Ubuntu/Linux - Recommended (isolated environment)
+## Ubuntu/Linux - Recommended (isolated environment)
 
-## Create isolated Python environment -> Activate it -> Install package safely isolated from systems
+-   Create isolated Python environment -> Activate it -> Install package safely isolated from systems
+
 ```
 python3 -m venv camera_env 
 source camera_env/bin/activate
