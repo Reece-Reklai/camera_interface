@@ -1,76 +1,71 @@
 Camera Grid Viewer
 
-Fullscreen multi-camera display - click for fullscreen, hold-to-swap cameras in grid.
+Fullscreen multi-camera display with click-to-fullscreen and hold-to-swap.
 Quick Start
-1. Install Dependencies
+
+bash
+# 1. Install
+chmod +x install.sh
+./install.sh
+
+# 2. Run
+./camera_grid.py
+
+Controls
+
+    Click any camera = toggle fullscreen
+
+    Hold 400ms = yellow border (swap mode)
+
+    Click other camera = swap positions
+
+    Click yellow camera = clear swap mode
+
+    Ctrl+Q = quit
+
+Install (manual)
 
 bash
 pip install PyQt6 opencv-python qdarkstyle imutils cv2-enumerate-cameras
+chmod +x camera_grid.py
 
-2. Plug in USB Cameras
-
-    Works with /dev/video0, /dev/video1, etc
-
-    Webcams, USB cameras, industrial cameras all work
-
-    No config needed - auto-detects
-
-3. Run
-
-bash
-python camera_grid.py
-
-App opens fullscreen with auto-detected cameras in smart grid layout.
-Controls
-Action	How	Result
-Single click	Click any camera	Toggle fullscreen
-Hold 400ms	Long-press camera	Yellow border = swap mode
-Swap cameras	Click other camera	Instant position swap
-Clear swap	Click yellow camera	Back to normal
-Quit	Ctrl+Q	Clean shutdown
-Example Usage
+Linux only: sudo usermod -a -G video $USER (then logout/login)
+Files
 
 text
-2 cameras detected → 1×2 grid
-Click cam0 → Fullscreen cam0  
-Click again → Back to grid
-Hold cam1 400ms → Yellow border on cam1
-Click cam0 → cam0 & cam1 swap positions
-Click yellow cam1 → Normal mode
+├── camera_grid.py     # Main app
+├── install.sh         # Setup script
+├── requirements.txt   # pip install -r
+└── README.md          # This file
 
-Debug Output
+Debug
 
-Watch terminal for real-time status:
+Terminal shows all activity:
 
 text
 DEBUG: Found 2 cameras: [0, 1]
-DEBUG: Grid 1×2, widget 1920x1080
 DEBUG: Press cam0_140123456
-DEBUG: Release cam0_140123456, hold=380ms
-DEBUG: Short click fullscreen cam0_140123456
+DEBUG: ENTER swap cam0_140123456  
+DEBUG: SWAP cam0_140123456 ↔ cam1_140123789
 
 Troubleshooting
-Problem	Fix
-No cameras found	Plug in USB camera
-ImportError	pip install PyQt6 opencv-python
-Permission denied	sudo usermod -a -G video $USER (Linux)
-GUI freezes	Already fixed - threaded capture
+Issue	Solution
+No cameras	ls /dev/video* - plug in USB cameras
+Permissions	sudo usermod -a -G video $USER
+Import error	pip install -r requirements.txt
 Won't quit	Ctrl+Q or Ctrl+C
-System Requirements
-
-Linux (Arch linux and Raspbian tested)
-
-    Python 3.8+
-
-    USB cameras (/dev/videoX)
-
-    X11 display (Wayland may need tweaks)
-
-File Structure
+Requirements
 
 text
-├── main.py     # Main app
-├── README.md   # This file
-└── install.sh  # Install esential packages
+PyQt6
+opencv-python  
+qdarkstyle
+imutils
+cv2-enumerate-cameras
 
-Tested: Raspberry Pi 4/5/OS and Arch linux
+Tested
+
+    Arch linux via AMD CPU and Nvidia GPU
+
+    Raspberry Pi 4 and 5 via Intel5 CPU
+
