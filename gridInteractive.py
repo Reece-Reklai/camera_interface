@@ -32,7 +32,7 @@ class CameraWidget(QtWidgets.QWidget):
         self.video_frame.setStyleSheet("border: 2px solid #555; background: black;")
         self.video_frame.setMouseTracking(True)
         self.video_frame.mousePressEvent = self.toggle_fullscreen
-        self.video_frame.setScaledContents(True)  # ← ONLY CHANGE HERE
+        self.video_frame.setScaledContents(True)
         
         # FPS tracking
         self.frame_count = 0
@@ -50,10 +50,6 @@ class CameraWidget(QtWidgets.QWidget):
         self.display_thread.start()
 
         print(f'Started camera {self.camera_stream_link}: {"✅" if self.online else "❌"}')
-
-    # Keep ALL other methods EXACTLY THE SAME as your original code
-    # ... (toggle_fullscreen, go_fullscreen, exit_fullscreen, test_and_init_camera, 
-    # spin, get_frame, update_display_loop, update_fps, set_frame, get_video_frame)
 
     def toggle_fullscreen(self, event):
         """Toggle fullscreen on video frame click"""
@@ -226,7 +222,7 @@ def get_smart_grid(num_cameras):
 def exit_application():
     QtWidgets.QApplication.quit()
 
-# Main application - IDENTICAL TO YOUR WORKING VERSION
+# Main application
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
     
@@ -243,7 +239,7 @@ if __name__ == "__main__":
     
     central_widget = QtWidgets.QWidget()
     mw.setCentralWidget(central_widget)
-    mw.showMaximized()
+    mw.showFullScreen()
 
     # Screen dimensions
     screen = app.primaryScreen().availableGeometry()
