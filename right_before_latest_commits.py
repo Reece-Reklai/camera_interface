@@ -28,6 +28,7 @@ CPU_TEMP_THRESHOLD_C = 75.0 # Celsius
 STRESS_HOLD_COUNT = 2       # number of consecutive checks before reducing fps
 RECOVER_HOLD_COUNT = 3      # number of consecutive checks before increasing fps
 
+
 def _read_cpu_load_ratio():
     try:
         load1, _, _ = os.getloadavg()
@@ -36,8 +37,8 @@ def _read_cpu_load_ratio():
     except Exception:
         return None
 
+
 def _read_cpu_temp_c():
-    # Common on Linux SBCs, including Raspberry Pi
     paths = [
         "/sys/class/thermal/thermal_zone0/temp",
         "/sys/class/hwmon/hwmon0/temp1_input",
@@ -49,13 +50,13 @@ def _read_cpu_temp_c():
                     raw = f.read().strip()
                 if raw:
                     val = float(raw)
-                    # Some files report millidegrees
                     if val > 1000:
                         val = val / 1000.0
                     return val
         except Exception:
             continue
     return None
+
 
 def _is_system_stressed():
     load_ratio = _read_cpu_load_ratio()
@@ -70,23 +71,16 @@ def _is_system_stressed():
     return stressed, load_ratio, temp_c
 
 
-# CAMERA THREAD = Reads video (without freezing hopefully)
 class CaptureWorker(QThread):
-    """
-    Reads frames from a camera device in a background QThread.
-    Throttles frame emission to `target_fps` to reduce main-thread load.
-    Requests desired capture resolution (capture_width/capture_height) where supported.
-    Emits `frame_ready` with raw BGR numpy arrays (no big copies).
-    """
-    frame_ready = pyqtSignal(object)   # NumPy BGR frame
-    status_changed = pyqtSignal(bool)  # Online/offline
+    frame_ready = pyqtSignal(object)
+    status_changed = pyqtSignal(bool)
 
     def __init__(
         self,
         stream_link,
         parent=None,
         maxlen=1,
-        target_fps=None,  # None = auto-detect from camera (max reported)
+        target_fps=None,
         capture_width=None,
         capture_height=None,
     ):
@@ -96,7 +90,7 @@ class CaptureWorker(QThread):
         self._reconnect_backoff = 1.0
         self._cap = None
         self._last_emit = 0.0
-        self._target_fps = target_fps  # None means auto
+        self._target_fps = target_fps
         self._emit_interval = 1.0 / 30.0
         self.capture_width = capture_width
         self.capture_height = capture_height
@@ -110,41 +104,33 @@ class CaptureWorker(QThread):
                 if self._cap is None or not self._cap.isOpened():
                     self._open_capture()
                     if not (self._cap and self._cap.isOpened()):
-                        # failed -> exponential backoff
                         time.sleep(self._reconnect_backoff)
                         self._reconnect_backoff = min(self._reconnect_backoff * 1.5, 10.0)
                         continue
-                    # Reset backoff and notify UI
                     self._reconnect_backoff = 1.0
                     self.status_changed.emit(True)
 
-                # Grab + read for minimal latency: prefer grab() then retrieve()
                 grabbed = self._cap.grab()
                 if not grabbed:
-                    logging.debug("grab failed for %s", self.stream_link)
                     self._close_capture()
                     self.status_changed.emit(False)
                     continue
 
                 ret, frame = self._cap.retrieve()
                 if not ret or frame is None:
-                    logging.debug("retrieve failed for %s", self.stream_link)
                     self._close_capture()
                     self.status_changed.emit(False)
                     continue
 
                 now = time.time()
-                # Throttle frame emission to detected/target fps
                 with self._fps_lock:
                     emit_interval = self._emit_interval
                 if now - self._last_emit >= emit_interval:
-                    # Use latest frame only (drop intermediate frames)
                     self.buffer.append(frame)
                     self.frame_ready.emit(frame)
                     self._last_emit = now
 
-                # Yield CPU a bit; keep small sleep to avoid busy loop
-                self.msleep(1)  # 1 ms
+                self.msleep(1)
             except Exception:
                 logging.exception("Exception in CaptureWorker %s", self.stream_link)
                 time.sleep(0.2)
@@ -153,11 +139,8 @@ class CaptureWorker(QThread):
         logging.info("Camera %s thread stopped", self.stream_link)
 
     def _open_capture(self):
-        """Try to open capture and apply sane settings."""
         try:
-            # platform-specific flags can help on Windows vs Linux
             backend = cv2.CAP_ANY
-            # On Linux prefer V4L2 for USB cameras
             if platform.system() == "Linux":
                 backend = cv2.CAP_V4L2
             cap = cv2.VideoCapture(self.stream_link, backend)
@@ -168,25 +151,21 @@ class CaptureWorker(QThread):
                     pass
                 return
 
-            # Prefer MJPG where possible to reduce CPU
             try:
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
             except Exception:
                 pass
 
-            # Request lower resolution for performance if provided
             if self.capture_width:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.capture_width))
             if self.capture_height:
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.capture_height))
 
-            # Decrease internal buffer to keep latency low
             try:
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             except Exception:
                 pass
 
-            # Try to set FPS hint (drivers may ignore)
             try:
                 if self._target_fps and self._target_fps > 0:
                     cap.set(cv2.CAP_PROP_FPS, float(self._target_fps))
@@ -215,14 +194,11 @@ class CaptureWorker(QThread):
             logging.exception("Failed to open capture %s", self.stream_link)
 
     def _configure_fps_from_camera(self):
-        # If target_fps is set, use it directly
         if self._target_fps and self._target_fps > 0:
             fps = float(self._target_fps)
         else:
-            # Auto-detect from driver (maximum reported)
             fps = float(self._cap.get(cv2.CAP_PROP_FPS)) if self._cap else 0.0
 
-        # Some drivers return 0 or nonsense; fallback to 30
         if fps <= 1.0 or fps > 240.0:
             fps = 30.0
 
@@ -239,7 +215,6 @@ class CaptureWorker(QThread):
             with self._fps_lock:
                 self._target_fps = fps
                 self._emit_interval = 1.0 / max(1.0, fps)
-            # Hint to driver (best-effort)
             try:
                 if self._cap:
                     self._cap.set(cv2.CAP_PROP_FPS, fps)
@@ -258,19 +233,32 @@ class CaptureWorker(QThread):
 
     def stop(self):
         self._running = False
-        # Wait for thread to exit (give it a little time)
         self.wait(2000)
         self._close_capture()
 
 
-# CAMERA WIDGET = Each camera lives here
+class FullscreenOverlay(QtWidgets.QWidget):
+    def __init__(self, on_click_exit):
+        super().__init__(None, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+        self.on_click_exit = on_click_exit
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet("background:black;")
+        self.label = QtWidgets.QLabel(self)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label.setScaledContents(True)
+        self.label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                                 QtWidgets.QSizePolicy.Policy.Ignored)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.label)
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.on_click_exit()
+        super().mousePressEvent(event)
+
+
 class CameraWidget(QtWidgets.QWidget):
-    """
-    One widget per camera. Optimized frame handling:
-    - The worker throttles frames (auto-detected fps)
-    - Avoids expensive cv2.resize and avoids unnecessary copies
-    - UI render is throttled to `ui_fps` using the latest frame only
-    """
     hold_threshold_ms = 400
 
     def __init__(
@@ -300,28 +288,23 @@ class CameraWidget(QtWidgets.QWidget):
 
         self.is_fullscreen = False
         self.grid_position = None
-        self._saved_parent = None
-        self._saved_position = None
         self._press_widget_id = None
         self._press_time = 0
         self._grid_parent = None
         self._touch_active = False
 
-        self._fullscreen_window_flags = Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint
-        self._normal_window_flags = Qt.WindowType.Widget
+        self._fs_overlay = None
 
         self.normal_style = "border: 2px solid #555; background: black;"
         self.swap_ready_style = "border: 4px solid #FFFF00; background: black;"
         self.setStyleSheet(self.normal_style)
         self.setObjectName(self.widget_id)
 
-        # Video display label
         self.video_label = QtWidgets.QLabel(self)
         self.video_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                                        QtWidgets.QSizePolicy.Policy.Expanding)
         self.video_label.setMinimumSize(1, 1)
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        # Let QLabel handle visual scaling; avoid resizing frames repeatedly
         self.video_label.setScaledContents(True)
         self.video_label.setMouseTracking(True)
         self.video_label.setObjectName(f"{self.widget_id}_label")
@@ -331,24 +314,19 @@ class CameraWidget(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.video_label)
 
-        # FPS counter
         self.frame_count = 0
         self.prev_time = time.time()
-
-        # Latest frame storage for render throttling
         self._latest_frame = None
 
-        # Target FPS management
         self.base_target_fps = target_fps
         self.current_target_fps = target_fps
 
-        # Worker: ask for a reasonable capture size to lower CPU
         cap_w, cap_h = request_capture_size if request_capture_size else (None, None)
         self.worker = CaptureWorker(
             stream_link,
             parent=self,
             maxlen=buffer_size,
-            target_fps=target_fps,  # None = auto-detect
+            target_fps=target_fps,
             capture_width=cap_w,
             capture_height=cap_h,
         )
@@ -356,38 +334,25 @@ class CameraWidget(QtWidgets.QWidget):
         self.worker.status_changed.connect(self.on_status_changed)
         self.worker.start()
 
-        # Render timer to throttle UI draw rate
         self.ui_render_fps = max(1, int(ui_fps))
         self.render_timer = QTimer(self)
         self.render_timer.setInterval(int(1000 / self.ui_render_fps))
         self.render_timer.timeout.connect(self._render_latest_frame)
         self.render_timer.start()
 
-        # UI timer prints FPS once per second
         self.ui_timer = QTimer(self)
         self.ui_timer.setInterval(1000)
         self.ui_timer.timeout.connect(self._print_fps)
         self.ui_timer.start()
 
-        # mouse event handling
         self.installEventFilter(self)
         self.video_label.installEventFilter(self)
 
         logging.debug("Widget %s ready", self.widget_id)
 
-    def _suspend_rendering(self, suspend: bool):
-        if suspend:
-            if self.render_timer.isActive():
-                self.render_timer.stop()
-            self.setUpdatesEnabled(False)
-            self.video_label.setUpdatesEnabled(False)
-        else:
-            self.setUpdatesEnabled(True)
-            self.video_label.setUpdatesEnabled(True)
-            if not self.render_timer.isActive():
-                self.render_timer.start()
-            # Render once after transition
-            self._render_latest_frame()
+    def _ensure_fullscreen_overlay(self):
+        if self._fs_overlay is None:
+            self._fs_overlay = FullscreenOverlay(self.exit_fullscreen)
 
     def eventFilter(self, obj, event):
         if obj not in (self, self.video_label):
@@ -408,7 +373,6 @@ class CameraWidget(QtWidgets.QWidget):
         try:
             if not event.points():
                 return True
-            # Treat single-finger touch like left mouse press
             if len(event.points()) == 1:
                 self._touch_active = True
                 self._press_time = time.time() * 1000.0
@@ -424,7 +388,6 @@ class CameraWidget(QtWidgets.QWidget):
             if not self._touch_active:
                 return True
             self._touch_active = False
-            # Mirror left mouse release behavior
             self._handle_release_as_left_click()
         except Exception:
             logging.exception("touch end")
@@ -572,54 +535,26 @@ class CameraWidget(QtWidgets.QWidget):
     def go_fullscreen(self):
         if self.is_fullscreen:
             return
-        try:
-            logging.debug("%s -> fullscreen", self.widget_id)
-            self._suspend_rendering(True)
-            self._saved_parent = self.parent()
-            self._saved_position = getattr(self, 'grid_position', None)
-            if self._saved_parent and self._saved_parent.layout():
-                try:
-                    self._saved_parent.layout().removeWidget(self)
-                except Exception:
-                    pass
-            self.setParent(None)
-            self.setWindowFlags(self._fullscreen_window_flags)
-            self.showFullScreen()
-            self.raise_()
-            self.activateWindow()
-            self.is_fullscreen = True
-        except Exception:
-            logging.exception("go_fullscreen")
-        finally:
-            self._suspend_rendering(False)
+        self._ensure_fullscreen_overlay()
+
+        screen = QtWidgets.QApplication.primaryScreen()
+        if screen:
+            self._fs_overlay.setGeometry(screen.geometry())
+
+        self._fs_overlay.showFullScreen()
+        self._fs_overlay.raise_()
+        self._fs_overlay.activateWindow()
+        self.is_fullscreen = True
 
     def exit_fullscreen(self):
         if not self.is_fullscreen:
             return
-        try:
-            logging.debug("%s <- grid[%s]", self.widget_id, self._saved_position)
-            self._suspend_rendering(True)
-            self.setWindowFlags(self._normal_window_flags)
-            if self._saved_parent and self._saved_position is not None:
-                self.setParent(self._saved_parent)
-                layout = self._saved_parent.layout()
-                if layout:
-                    layout.addWidget(self, *self._saved_position)
-            self.show()
-            self.is_fullscreen = False
-            if self._saved_parent and self._saved_parent.window():
-                self._saved_parent.window().showFullScreen()
-        except Exception:
-            logging.exception("exit_fullscreen")
-        finally:
-            self._suspend_rendering(False)
+        if self._fs_overlay:
+            self._fs_overlay.hide()
+        self.is_fullscreen = False
 
     @pyqtSlot(object)
     def on_frame(self, frame_bgr):
-        """
-        Receives the newest frame and stores it.
-        Rendering is throttled by a timer in _render_latest_frame().
-        """
         try:
             if frame_bgr is None:
                 return
@@ -633,7 +568,6 @@ class CameraWidget(QtWidgets.QWidget):
             if frame_bgr is None:
                 return
 
-            # If the camera delivers grayscale, show it as-is
             if frame_bgr.ndim == 2:
                 h, w = frame_bgr.shape
                 bytes_per_line = w
@@ -650,7 +584,19 @@ class CameraWidget(QtWidgets.QWidget):
                 )
 
             pix = QtGui.QPixmap.fromImage(img)
-            self.video_label.setPixmap(pix)
+
+            if self.is_fullscreen and self._fs_overlay:
+                target_size = self._fs_overlay.size()
+                if target_size.width() > 0 and target_size.height() > 0:
+                    pix = pix.scaled(
+                        target_size,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
+                self._fs_overlay.label.setPixmap(pix)
+            else:
+                self.video_label.setPixmap(pix)
+
             self.frame_count += 1
         except Exception:
             logging.exception("render frame")
@@ -698,7 +644,6 @@ class CameraWidget(QtWidgets.QWidget):
             pass
 
 
-# === HELPER FUNCTIONS ===
 def get_smart_grid(num_cameras):
     if num_cameras <= 1: return 1, 1
     elif num_cameras == 2: return 1, 2
@@ -721,7 +666,6 @@ def _run_cmd(cmd):
 
 
 def _get_pids_from_lsof(device_path):
-    # lsof -t gives only PIDs, one per line
     out, _, code = _run_cmd(f"lsof -t {device_path}")
     if code != 0 or not out:
         return set()
@@ -734,11 +678,9 @@ def _get_pids_from_lsof(device_path):
 
 
 def _get_pids_from_fuser(device_path):
-    # fuser outputs PIDs; use -v for verbose, parse digits
     out, _, code = _run_cmd(f"fuser -v {device_path}")
     if code != 0 or not out:
         return set()
-    # Extract all PIDs from output
     pids = set()
     for match in re.findall(r"\b(\d+)\b", out):
         pids.add(int(match))
@@ -754,28 +696,20 @@ def _is_pid_alive(pid):
 
 
 def kill_device_holders(device_path, grace=0.4):
-    """
-    Targeted kill: identify PIDs holding this device and kill only them.
-    Uses lsof first, falls back to fuser.
-    """
     pids = _get_pids_from_lsof(device_path)
     if not pids:
         pids = _get_pids_from_fuser(device_path)
 
-    # Never kill ourselves
     pids.discard(os.getpid())
-
     if not pids:
         return False
 
     logging.info("Killing holders of %s: %s", device_path, sorted(pids))
 
-    # Try graceful kill first
     for pid in pids:
         try:
             os.kill(pid, signal.SIGTERM)
         except PermissionError:
-            # Fallback to fuser with sudo for that device
             _run_cmd(f"sudo fuser -k {device_path}")
             break
         except Exception:
@@ -783,7 +717,6 @@ def kill_device_holders(device_path, grace=0.4):
 
     time.sleep(grace)
 
-    # Force kill if still alive
     for pid in list(pids):
         if _is_pid_alive(pid):
             try:
@@ -804,12 +737,6 @@ def test_single_camera(
     post_kill_retries=2,
     post_kill_delay=0.25,
 ):
-    """
-    Efficient, reliable probe:
-    - Retry a few times (short delay) before killing anything.
-    - Only do targeted kill once if still failing.
-    - After kill, retry a couple times.
-    """
     device_path = f"/dev/video{cam_index}"
 
     def try_open():
@@ -818,7 +745,6 @@ def test_single_camera(
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             if not cap.isOpened():
                 return False
-            # Quick grab to ensure device is responsive
             if not cap.grab():
                 return False
             return True
@@ -828,13 +754,11 @@ def test_single_camera(
             except Exception:
                 pass
 
-    # First phase: quick retries, no kill
     for _ in range(retries):
         if try_open():
             return cam_index
         time.sleep(retry_delay)
 
-    # Optional targeted cleanup if still failing
     if allow_kill:
         killed = kill_device_holders(device_path)
         if killed:
@@ -864,7 +788,7 @@ def find_working_cameras():
         logging.info("No /dev/video* devices found!")
         return []
 
-    max_workers = min(4, len(indexes))  # Lower CPU pressure for Raspberry Pi
+    max_workers = min(4, len(indexes))
     logging.info("Testing %d cameras concurrently (workers=%d)...", len(indexes), max_workers)
     working = []
     lock = threading.Lock()
@@ -908,21 +832,15 @@ def safe_cleanup(widgets):
 
 
 def choose_profile(camera_count):
-    """
-    Adaptive performance profile based on active camera count.
-    Returns (capture_width, capture_height, capture_fps, ui_fps).
-    """
     if camera_count <= 1:
         return 1280, 720, 30, 30
     if camera_count == 2:
         return 960, 540, 20, 20
     if camera_count == 3:
         return 800, 450, 15, 15
-    # 4 or more
     return 640, 480, 15, 15
 
 
-# === MAIN APPLICATION ===
 def main():
     logging.info("Starting camera grid app")
     app = QtWidgets.QApplication(sys.argv)
@@ -957,11 +875,9 @@ def main():
         widget_width = max(1, screen.width() // cols)
         widget_height = max(1, screen.height() // rows)
 
-        # Adaptive profile based on active camera count
         cap_w, cap_h, cap_fps, ui_fps = choose_profile(len(working_cameras))
         logging.info("Profile: %dx%d @ %d FPS (UI %d FPS)", cap_w, cap_h, cap_fps, ui_fps)
 
-        # Create widgets (limit to 9)
         for cam_index in working_cameras[:9]:
             cw = CameraWidget(
                 widget_width,
@@ -986,7 +902,6 @@ def main():
         label.setStyleSheet("font-size: 24px; color: #888;")
         layout.addWidget(label, 0, 0)
 
-    # === Dynamic FPS adjustment based on CPU load/temp ===
     if DYNAMIC_FPS_ENABLED and camera_widgets:
         stress_counter = {"stress": 0, "recover": 0}
 
@@ -1000,7 +915,6 @@ def main():
                 stress_counter["recover"] += 1
                 stress_counter["stress"] = 0
 
-            # Reduce FPS if stress persists
             if stress_counter["stress"] >= STRESS_HOLD_COUNT:
                 for w in camera_widgets:
                     base = w.base_target_fps or 30
@@ -1013,7 +927,6 @@ def main():
                              f"{load_ratio:.2f}" if load_ratio is not None else "n/a",
                              f"{temp_c:.1f}C" if temp_c is not None else "n/a")
 
-            # Recover FPS gradually if stable
             if stress_counter["recover"] >= RECOVER_HOLD_COUNT:
                 for w in camera_widgets:
                     base = w.base_target_fps or 30
