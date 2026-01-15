@@ -1,297 +1,539 @@
 """
-Multi-camera grid viewer - 0 FPS DEBUG + FIXED VERSION
-🔧 DIAGNOSTIC MODE + SIGNAL BLOCKAGE FIX
+Multi-camera grid viewer
+Enhanced with FPS-based hotplug detection for Raspberry Pi
 """
 
-from PyQt5 import QtCore, QtGui, QtWidgets
-from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QThread, QTimer, QMutex
-from PyQt5.QtWidgets import QShortcut
-from PyQt5.QtGui import QKeySequence
-import sys
-import cv2
+from PyQt6 import QtCore, QtGui, QtWidgets  # GUI framework - makes windows, buttons
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QThread, QTimer  # Core Qt features
+import sys  # System utilities - exit cleanly
+import cv2  # OpenCV - reads camera video frames
 import time 
-import traceback
-import glob
-import atexit
-import signal
-import numpy as np
+import traceback  # Error reporting - show crashes clearly
+from collections import deque  # Ring buffer - keeps last 4 frames
+from cv2_enumerate_cameras import enumerate_cameras  # Finds all /dev/video devices
+import qdarkstyle  
+import imutils  # Image resizing utilities
+import atexit  # Runs cleanup code when program exits
+import signal  # Handles Ctrl+C gracefully
 
-try:
-    import qdarkstyle
-    DARKSTYLE_AVAILABLE = True
-except:
-    DARKSTYLE_AVAILABLE = False
-
-# 🔥 FIXED: Use QMutex + Direct Connection + Diagnostic prints
+# 🔥 ENHANCED CAMERA THREAD = Reads video + FPS monitoring + auto-reconnect
 class CaptureWorker(QThread):
-    frame_ready = pyqtSignal(object, int)  # frame + frame_count
-    status_changed = pyqtSignal(bool)
+    """
+    Runs in background thread. Reads camera frames every 10ms.
+    Emits new frames to main thread via signals (thread-safe).
+    Auto-reconnects if camera disconnects OR 0 FPS detected.
+    """
+    frame_ready = pyqtSignal(object)  # Sends frame to GUI
+    status_changed = pyqtSignal(bool)  # Online/offline status
 
-    def __init__(self, stream_link, parent=None):
+    def __init__(self, stream_link, parent=None, maxlen=4):
         super().__init__(parent)
-        self.stream_link = stream_link
-        self._running = True
-        self._cap = None
-        self.mutex = QMutex()
+        self.stream_link = stream_link  # Camera ID (0, 1, 2...)
+        self._running = True  # Stop flag
+        self._reconnect_backoff = 1.0  # Wait longer each reconnect attempt
+        self._cap = None  # OpenCV camera object
+        self.buffer = deque(maxlen=maxlen)  # Keeps last 4 frames
+        
+        # 🔥 FPS MONITORING VARIABLES
         self.frame_count = 0
+        self.fps_check_start = time.time()
+        self.zero_fps_count = 0
+        self.zero_fps_threshold = 3.0  # Trigger reconnect after 3s of 0 FPS
+        self.last_good_frame_time = time.time()
 
     def run(self):
-        print(f"🎥 [DEBUG] Worker {self.stream_link} STARTING...")
-        
-        # V4L2 ONLY - Most reliable on RPi
-        cap = cv2.VideoCapture(self.stream_link, cv2.CAP_V4L2)
-        if not cap.isOpened():
-            print(f"❌ [DEBUG] CAP_V4L2 FAILED for {self.stream_link}")
-            return
-            
-        print(f"✅ [DEBUG] Opened {self.stream_link}")
-        
-        # CRITICAL RPi FIXES
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        
-        ret, test_frame = cap.read()
-        if not ret or test_frame is None:
-            print(f"❌ [DEBUG] Test read FAILED {self.stream_link}")
-            cap.release()
-            return
-            
-        print(f"✅ [DEBUG] Test frame OK: {test_frame.shape}")
-        self._cap = cap
-        self.status_changed.emit(True)
-
-        # 🔥 MAIN LOOP - NO SLEEP + DIAGNOSTIC
+        """Infinite loop - grab frames until stopped."""
+        print(f"DEBUG: Camera {self.stream_link} thread started")
         while self._running:
-            self.mutex.lock()
-            if not self._running:
-                self.mutex.unlock()
-                break
+            try:
+                # 🔥 CHECK FOR RECONNECT: Disconnected OR 0 FPS
+                if self._needs_reconnect():
+                    self._trigger_reconnect()
+                    continue
+
+                # Read one frame
+                status, frame = self._cap.read()
+                if not status or frame is None:
+                    self._close_capture()
+                    self.status_changed.emit(False)
+                    continue
+
+                # 🔥 FRAME SUCCESS: Update FPS monitoring
+                self._update_fps_monitor(frame)
+                self.last_good_frame_time = time.time()  # Reset timer
                 
-            ret, frame = self._cap.read()
-            self.frame_count += 1
+                # Send frame to GUI thread
+                self.buffer.append(frame)
+                self.frame_ready.emit(frame)
+                time.sleep(0.01)  # Don't overload CPU (Raspberry Pi friendly)
+                
+            except Exception:
+                traceback.print_exc()
+                time.sleep(0.5)
+        
+        self._close_capture()
+
+    def _needs_reconnect(self):
+        """🔥 Check if camera disconnected OR stalled (0 FPS too long)"""
+        # Case 1: Camera not open
+        if self._cap is None or not self._cap.isOpened():
+            return True
+        
+        # Case 2: 🔥 No good frames for 3+ seconds (0 FPS detection)
+        if (time.time() - self.last_good_frame_time) > self.zero_fps_threshold:
+            print(f"DEBUG: Camera {self.stream_link} 0 FPS for {time.time() - self.last_good_frame_time:.1f}s → forcing reconnect")
+            return True
             
-            if ret and frame is not None:
-                print(f"📸 [DEBUG] Frame #{self.frame_count} captured {self.stream_link} {frame.shape}")
-                # 🔥 CRITICAL: Qt.DirectConnection ensures immediate delivery
-                self.frame_ready.emit(frame, self.frame_count)
+        return False
+
+    def _trigger_reconnect(self):
+        """🔥 Handle reconnect (both normal + FPS trigger)"""
+        self._close_capture()
+        
+        if not self._open_capture() or not (self._cap and self._cap.isOpened()):
+            # Failed - exponential backoff
+            time.sleep(self._reconnect_backoff)
+            self._reconnect_backoff = min(self._reconnect_backoff * 1.5, 10.0)
+            self.status_changed.emit(False)
+            return False
+        
+        self.status_changed.emit(True)
+        self._reconnect_backoff = 1.0  # Reset backoff on success
+        print(f"DEBUG: Camera {self.stream_link} reconnected")
+        return True
+
+    def _update_fps_monitor(self, frame):
+        """🔥 Track FPS and detect stalls"""
+        self.frame_count += 1
+        now = time.time()
+        
+        # Calculate FPS every second
+        if now - self.fps_check_start >= 1.0:
+            fps = self.frame_count / (now - self.fps_check_start)
+            self.frame_count = 0
+            self.fps_check_start = now
+            
+            if fps < 0.5:  # Effectively stalled
+                self.zero_fps_count += 1
+                print(f"DEBUG: Camera {self.stream_link} LOW FPS: {fps:.1f} (count={self.zero_fps_count})")
             else:
-                print(f"⚠️  [DEBUG] Read failed #{self.frame_count}")
-                
-            self.mutex.unlock()
-            
-        print(f"🛑 [DEBUG] Worker {self.stream_link} STOPPED")
+                self.zero_fps_count = 0
+
+    def _open_capture(self):
+        """Try V4L2 first (Linux USB cameras), then any backend."""
+        try:
+            for api in [cv2.CAP_V4L2, cv2.CAP_ANY]:
+                cap = cv2.VideoCapture(self.stream_link, api)
+                if cap.isOpened():
+                    # MJPG = lower CPU usage
+                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+                    self._cap = cap
+                    return True
+                cap.release()
+        except:
+            pass
+        return False
+
+    def _close_capture(self):
+        """Safely close camera."""
+        try:
+            if self._cap:
+                self._cap.release()
+                self._cap = None
+        except:
+            pass
 
     def stop(self):
+        """Stop thread cleanly."""
         self._running = False
-        self.mutex.lock()
-        self.mutex.unlock()
-        if self._cap:
-            self._cap.release()
-            self._cap = None
+        self.wait(timeout=2000)
+        self._close_capture()
 
-# 🔥 FIXED WIDGET - Qt.DirectConnection + DEBUG
+# CAMERA WIDGET = Each camera lives here (UNCHANGED)
 class CameraWidget(QtWidgets.QWidget):
-    def __init__(self, width, height, stream_link=0, parent=None):
+    hold_threshold_ms = 400
+
+    def __init__(self, width, height, stream_link=0, aspect_ratio=False, parent=None, buffer_size=4):
         super().__init__(parent)
-        print(f"🎬 Creating widget cam{stream_link}")
+        print(f"DEBUG: Creating camera {stream_link}")
         
-        self.stream_link = stream_link
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setMouseTracking(True)
+        
+        self.screen_width = max(1, width)
+        self.screen_height = max(1, height)
+        self.maintain_aspect_ratio = aspect_ratio
+        self.camera_stream_link = stream_link
+        
         self.widget_id = f"cam{stream_link}_{id(self)}"
-        
-        self.normal_style = "border: 2px solid #00ff00; background: black; color: white;"
-        self.error_style = "border: 4px solid red; background: black; color: white;"
+        self.is_fullscreen = False
+        self.grid_position = None
+        self._saved_parent = None
+        self._saved_position = None
+        self._press_widget_id = None
+        self._press_time = 0
+        self._grid_parent = None
+
+        self.normal_style = "border: 2px solid #555; background: black;"
+        self.swap_ready_style = "border: 4px solid #FFFF00; background: black;"
         self.setStyleSheet(self.normal_style)
-        
-        self.video_label = QtWidgets.QLabel("WAITING...", self)
-        self.video_label.setAlignment(Qt.AlignCenter)
+        self.setObjectName(self.widget_id)
+
+        self.video_label = QtWidgets.QLabel(self)
+        self.video_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
+                                       QtWidgets.QSizePolicy.Policy.Expanding)
+        self.video_label.setMinimumSize(1, 1)
+        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setScaledContents(True)
-        self.video_label.setStyleSheet("font-size: 20px; color: yellow;")
-        
+        self.video_label.setMouseTracking(True)
+        self.video_label.setObjectName(f"{self.widget_id}_label")
+
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0,0,0,0)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.video_label)
-        
+
         self.frame_count = 0
-        self.worker = None
-        self.start_worker()
+        self.prev_time = time.time()
 
-    def start_worker(self):
-        self.worker = CaptureWorker(self.stream_link, self)
-        
-        # 🔥 CRITICAL FIXES:
-        # 1. Qt.DirectConnection - IMMEDIATE delivery
-        # 2. Lambda preserves frame_count
-        self.worker.frame_ready.connect(
-            lambda frame, count: self.on_frame(frame, count), 
-            Qt.DirectConnection
-        )
-        self.worker.status_changed.connect(self.on_status_changed, Qt.DirectConnection)
-        
-        print(f"🔗 [DEBUG] Signals connected for {self.stream_link}")
+        self.worker = CaptureWorker(stream_link, parent=self, maxlen=buffer_size)
+        self.worker.frame_ready.connect(self.on_frame)
+        self.worker.status_changed.connect(self.on_status_changed)
         self.worker.start()
-        print(f"🚀 [DEBUG] Worker STARTED for {self.stream_link}")
 
-    @pyqtSlot(object, int)
-    def on_frame(self, frame, count):
+        self.ui_timer = QTimer(self)
+        self.ui_timer.setInterval(1000)
+        self.ui_timer.timeout.connect(self._print_fps)
+        self.ui_timer.start()
+
+        self.installEventFilter(self)
+        self.video_label.installEventFilter(self)
+        print(f"DEBUG: Widget {self.widget_id} ready")
+
+    def eventFilter(self, obj, event):
+        if obj not in (self, self.video_label):
+            return super().eventFilter(obj, event)
+            
+        if event.type() == QtCore.QEvent.Type.MouseButtonPress:
+            return self._on_mouse_press(event)
+        if event.type() == QtCore.QEvent.Type.MouseButtonRelease:
+            return self._on_mouse_release(event)
+        return super().eventFilter(obj, event)
+
+    def _on_mouse_press(self, event):
         try:
-            print(f"🎥 [DEBUG] on_frame CALLED #{count} {self.stream_link}")
-            
-            if frame is None:
-                print(f"⚠️  [DEBUG] Empty frame {self.stream_link}")
-                return
-            
-            # FASTEST CONVERSION
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            rgb_small = cv2.resize(rgb, (320, 240))
-            
-            h, w = rgb_small.shape[:2]
-            qimg = QtGui.QImage(rgb_small.tobytes(), w, h, 3*w, QtGui.QImage.Format_RGB888)
-            pixmap = QtGui.QPixmap.fromImage(qimg)
-            
-            self.video_label.setPixmap(pixmap)
-            self.video_label.setText("")  # Clear "WAITING..."
-            
-            self.frame_count = count
-            print(f"✅ [DEBUG] Frame #{count} DISPLAYED {self.stream_link}")
-            
-        except Exception as e:
-            print(f"💥 [DEBUG] on_frame ERROR {self.stream_link}: {e}")
+            if event.button() == QtCore.Qt.MouseButton.LeftButton:
+                self._press_time = time.time() * 1000.0
+                self._press_widget_id = self.widget_id
+                self._grid_parent = self.parent()
+                print(f"DEBUG: Press {self.widget_id}")
+            elif event.button() == QtCore.Qt.MouseButton.RightButton:
+                self.toggle_fullscreen()
+        except Exception:
             traceback.print_exc()
-            self.video_label.setText(f"ERROR\n{e}")
+        return True
+
+    def _on_mouse_release(self, event):
+        try:
+            if (event.button() != QtCore.Qt.MouseButton.LeftButton or 
+                not self._press_widget_id or self._press_widget_id != self.widget_id):
+                return True
+
+            hold_time = (time.time() * 1000.0) - self._press_time
+            print(f"DEBUG: Release {self.widget_id}, hold={hold_time:.0f}ms")
+
+            swap_parent = self._grid_parent
+            if not swap_parent or not hasattr(swap_parent, 'selected_camera'):
+                self._reset_mouse_state()
+                self.toggle_fullscreen()
+                return True
+
+            if swap_parent.selected_camera == self:
+                print(f"DEBUG: Clear swap {self.widget_id}")
+                swap_parent.selected_camera = None
+                self.reset_style()
+                self._reset_mouse_state()
+                return True
+
+            if (swap_parent.selected_camera and 
+                swap_parent.selected_camera != self and 
+                not self.is_fullscreen):
+                other = swap_parent.selected_camera
+                print(f"DEBUG: SWAP {other.widget_id} ↔ {self.widget_id}")
+                self.do_swap(other, self, swap_parent)
+                other.reset_style()
+                swap_parent.selected_camera = None
+                self._reset_mouse_state()
+                return True
+
+            if hold_time >= self.hold_threshold_ms and not self.is_fullscreen:
+                print(f"DEBUG: ENTER swap {self.widget_id}")
+                swap_parent.selected_camera = self
+                self.video_label.setStyleSheet(self.swap_ready_style)
+                self._reset_mouse_state()
+                return True
+
+            print(f"DEBUG: Short click fullscreen {self.widget_id}")
+            self.toggle_fullscreen()
+            
+        except Exception:
+            traceback.print_exc()
+        finally:
+            self._reset_mouse_state()
+        return True
+
+    def _reset_mouse_state(self):
+        self._press_time = 0
+        self._press_widget_id = None
+        self._grid_parent = None
+
+    def do_swap(self, source, target, layout_parent):
+        try:
+            source_pos = getattr(source, 'grid_position', None)
+            target_pos = getattr(target, 'grid_position', None)
+            if source_pos is None or target_pos is None:
+                print(f"DEBUG: Swap failed - missing positions")
+                return
+
+            layout = layout_parent.layout()
+            layout.removeWidget(source)
+            layout.removeWidget(target)
+            layout.addWidget(target, *source_pos)
+            layout.addWidget(source, *target_pos)
+            source.grid_position, target.grid_position = target_pos, source_pos
+            print(f"DEBUG: Swap complete {source.widget_id} ↔ {target.widget_id}")
+        except Exception:
+            traceback.print_exc()
+
+    def toggle_fullscreen(self):
+        if self.is_fullscreen:
+            self.exit_fullscreen()
+        else:
+            self.go_fullscreen()
+
+    def go_fullscreen(self):
+        if self.is_fullscreen:
+            return
+        try:
+            print(f"DEBUG: {self.widget_id} → fullscreen")
+            self._saved_parent = self.parent()
+            self._saved_position = getattr(self, 'grid_position', None)
+            
+            if self._saved_parent and self._saved_parent.layout():
+                self._saved_parent.layout().removeWidget(self)
+
+            self.setParent(None)
+            self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+            self.showFullScreen()
+            self.is_fullscreen = True
+        except Exception:
+            traceback.print_exc()
+
+    def exit_fullscreen(self):
+        if not self.is_fullscreen:
+            return
+        try:
+            print(f"DEBUG: {self.widget_id} ← grid[{self._saved_position}]")
+            
+            self.setWindowFlags(Qt.WindowType.Widget)
+            self.show()
+            
+            if self._saved_parent and self._saved_position:
+                self.setParent(self._saved_parent)
+                layout = self._saved_parent.layout()
+                if layout:
+                    layout.addWidget(self, *self._saved_position)
+            
+            self.is_fullscreen = False
+            
+            if self._saved_parent and self._saved_parent.window():
+                self._saved_parent.window().showFullScreen()
+        except Exception:
+            traceback.print_exc()
+
+    @pyqtSlot(object)
+    def on_frame(self, frame):
+        try:
+            if frame is None:
+                return
+                
+            if self.is_fullscreen:
+                w, h = self.width(), self.height()
+                if w > 0 and h > 0:
+                    frame_resized = cv2.resize(frame, (w, h))
+                else:
+                    return
+            else:
+                frame_resized = cv2.resize(frame, (self.screen_width, self.screen_height))
+
+            frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+            h, w, ch = frame_rgb.shape
+            bytes_per_line = ch * w
+            img = QtGui.QImage(frame_rgb.data.tobytes(), w, h, bytes_per_line, 
+                             QtGui.QImage.Format.Format_RGB888)
+            pix = QtGui.QPixmap.fromImage(img)
+            self.video_label.setPixmap(pix)
+            self.frame_count += 1
+        except Exception:
+            pass
 
     @pyqtSlot(bool)
     def on_status_changed(self, online):
-        print(f"📡 [DEBUG] Status {self.stream_link}: {'ONLINE' if online else 'OFFLINE'}")
         if online:
             self.setStyleSheet(self.normal_style)
         else:
-            self.setStyleSheet(self.error_style)
-            self.video_label.setText("CAM OFFLINE")
+            self.video_label.clear()
+
+    def reset_style(self):
+        self.video_label.setStyleSheet("")
+        self.setStyleSheet(self.normal_style)
+
+    def _print_fps(self):
+        try:
+            now = time.time()
+            elapsed = now - self.prev_time
+            if elapsed >= 1.0:
+                fps = self.frame_count / elapsed if elapsed > 0 else 0.0
+                print(f"DEBUG: {self.widget_id} FPS: {fps:.1f}")
+                self.frame_count = 0
+                self.prev_time = now
+        except:
+            pass
 
     def cleanup(self):
-        print(f"🧹 [DEBUG] Cleaning {self.stream_link}")
-        if self.worker:
-            self.worker.stop()
-            self.worker.quit()
-            self.worker.wait(3000)
-
-# 🔍 ENHANCED CAMERA DETECTION
-def find_working_cameras():
-    working = []
-    print("\n" + "="*60)
-    print("🔍 COMPREHENSIVE RPi CAMERA SCAN")
-    print("="*60)
-    
-    devices = glob.glob('/dev/video*')
-    print(f"📹 Devices: {devices}")
-    
-    for device in sorted(devices, key=lambda x: int(x[10:])):
         try:
-            i = int(device[10:])
-            print(f"\n🔎 Testing {device} (#{i})")
+            if hasattr(self, 'worker') and self.worker:
+                self.worker.stop()
+        except:
+            pass
+
+# === HELPER FUNCTIONS ===
+def get_smart_grid(num_cameras):
+    """Calculate best rows/cols for N cameras. Max 9."""
+    if num_cameras <= 1: return 1, 1
+    elif num_cameras == 2: return 1, 2
+    elif num_cameras == 3: return 1, 3
+    elif num_cameras == 4: return 2, 2
+    elif num_cameras <= 6: return 2, 3
+    elif num_cameras <= 9: return 3, 3
+    else:
+        cols = min(4, int(num_cameras**0.5 * 1.5))
+        rows = (num_cameras + cols - 1) // cols
+        return rows, cols
+
+def find_working_cameras():
+    """Test /dev/video0-4 + V4L2 devices with delays for RPi USB detection."""
+    working = []
+    try:
+        enumerated = [cam.index for cam in enumerate_cameras(cv2.CAP_V4L2)]
+        print(f"DEBUG: Enumerated V4L2 cameras: {enumerated}")
+    except:
+        enumerated = []
+    
+    test_indices = list(set([0,1,2,3,4] + enumerated))
+    print(f"DEBUG: Testing camera indices: {test_indices}")
+    
+    for i in test_indices:
+        if i in working: 
+            continue
+            
+        print(f"DEBUG: Testing camera {i}...")
+        try:
+            time.sleep(0.5)  # USB enumeration delay
             
             cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
+            time.sleep(0.3)  # Camera init delay
+            
             if cap.isOpened():
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                ret, frame = cap.read()
-                cap.release()
-                
-                if ret and frame is not None:
-                    print(f"✅ #{i} WORKING ({frame.shape})")
+                time.sleep(0.2)  # Stabilization
+                ret, test_frame = cap.read()
+                if ret and test_frame is not None:
                     working.append(i)
+                    print(f"DEBUG: Camera {i} confirmed working")
                 else:
-                    print(f"⚠️  #{i} No frames")
+                    print(f"DEBUG: Camera {i} opened but no frame")
             else:
-                print(f"❌ #{i} Can't open")
+                print(f"DEBUG: Camera {i} failed to open")
+                
+            cap.release()
+            time.sleep(0.5)  # Between tests
+            
         except Exception as e:
-            print(f"💥 {device}: {e}")
+            print(f"DEBUG: Camera {i} error: {e}")
+            time.sleep(0.5)
     
-    print(f"\n🎯 FOUND {len(working)} CAMERAS: {working}")
+    print(f"DEBUG: Confirmed {len(working)} working cameras: {working}")
     return working
 
-def get_smart_grid(n):
-    if n <= 1: return 1, 1
-    if n == 2: return 1, 2
-    if n == 3: return 1, 3
-    if n == 4: return 2, 2
-    return 2, 3
-
 def safe_cleanup(widgets):
-    print("\n🧹 GLOBAL CLEANUP")
-    for w in widgets:
+    print("DEBUG: Cleaning all cameras")
+    for w in widgets[:]:
         try:
             w.cleanup()
-        except Exception as e:
-            print(f"Cleanup error: {e}")
+        except:
+            pass
 
+# === MAIN APPLICATION ===
 def main():
-    print("🚀 RPi Multi-Cam DEBUG VERSION - 0 FPS FIXED")
+    print("DEBUG: Starting camera grid app")
     app = QtWidgets.QApplication(sys.argv)
     camera_widgets = []
 
-    # Graceful exit
-    signal.signal(signal.SIGINT, lambda s,f: sys.exit(0))
+    def on_sigint(sig, frame):
+        safe_cleanup(camera_widgets)
+        sys.exit(0)
+    signal.signal(signal.SIGINT, on_sigint)
     atexit.register(lambda: safe_cleanup(camera_widgets))
 
-    # Styling
-    if DARKSTYLE_AVAILABLE:
-        try:
-            app.setStyleSheet(qdarkstyle.load_stylesheet_pyqt5())
-        except:
-            app.setStyle("Fusion")
-    else:
-        app.setStyle("Fusion")
+    try:
+        app.setStyleSheet(qdarkstyle.load_stylesheet_pyqt6())
+    except:
+        app.setStyle(QtWidgets.QStyleFactory.create("Fusion"))
 
-    # Fullscreen window
     mw = QtWidgets.QMainWindow()
-    mw.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-    central = QtWidgets.QWidget()
-    mw.setCentralWidget(central)
+    mw.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint)
+    central_widget = QtWidgets.QWidget()
+    central_widget.selected_camera = None
+    mw.setCentralWidget(central_widget)
     mw.showFullScreen()
 
     screen = app.primaryScreen().availableGeometry()
-    print(f"🖥️  Screen: {screen.width()}x{screen.height()}")
-    
-    cameras = find_working_cameras()
-    layout = QtWidgets.QGridLayout(central)
+    working_cameras = find_working_cameras()
+    print(f"DEBUG: Found {len(working_cameras)} cameras")
+
+    # 🔥 FINAL INITIALIZATION DELAY
+    print("DEBUG: Final camera init delay...")
+    time.sleep(1.0)
+
+    layout = QtWidgets.QGridLayout(central_widget)
     layout.setContentsMargins(10,10,10,10)
     layout.setSpacing(10)
 
-    if cameras:
-        rows, cols = get_smart_grid(len(cameras))
-        cell_w = screen.width() // cols // 2  # Smaller for debug
-        cell_h = screen.height() // rows // 2
+    if working_cameras:
+        rows, cols = get_smart_grid(len(working_cameras))
+        widget_width = screen.width() // cols
+        widget_height = screen.height() // rows
         
-        print(f"📐 Grid: {rows}x{cols}, cell: {cell_w}x{cell_h}")
-        
-        for i, cam_id in enumerate(cameras[:4]):  # Max 4 for debug
-            widget = CameraWidget(cell_w, cell_h, cam_id, central)
-            camera_widgets.append(widget)
-            row, col = divmod(i, cols)
-            layout.addWidget(widget, row, col)
-            print(f"➕ Added cam#{cam_id} at [{row},{col}]")
-    else:
-        label = QtWidgets.QLabel(
-            "❌ NO CAMERAS FOUND\n\n"
-            "1. Check USB connections\n"
-            "2. sudo usermod -a -G video $USER\n"
-            "3. sudo modprobe uvcvideo\n"
-            "4. reboot\n\n"
-            "lsusb = ?"
-        )
-        label.setAlignment(Qt.AlignCenter)
-        label.setStyleSheet("font-size: 28px; color: #ff4444; background: black;")
-        layout.addWidget(label)
+        for cam_index in working_cameras[:9]:
+            cw = CameraWidget(widget_width, widget_height, cam_index, parent=central_widget)
+            camera_widgets.append(cw)
 
-    # ESC or Ctrl+Q to quit
-    QShortcut(QKeySequence('Ctrl+Q'), mw, app.quit)
-    QShortcut(QKeySequence('Escape'), mw, app.quit)
-    
-    print("\n🎮 Controls: Ctrl+Q or ESC = Quit")
-    print("📊 Watch console for [DEBUG] messages!")
-    
-    sys.exit(app.exec_())
+        for i, cw in enumerate(camera_widgets):
+            row = i // cols
+            col = i % cols
+            cw.grid_position = (row, col)
+            layout.addWidget(cw, row, col)
+    else:
+        label = QtWidgets.QLabel("NO CAMERAS FOUND")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet("font-size: 24px; color: #888;")
+        layout.addWidget(label, 0, 0)
+
+    app.aboutToQuit.connect(lambda: safe_cleanup(camera_widgets))
+    QtGui.QShortcut(QtGui.QKeySequence('Ctrl+Q'), mw, 
+                   lambda: (safe_cleanup(camera_widgets), app.quit()))
+
+    print("DEBUG: Short click=fullscreen toggle. Hold 400ms=swap mode. Ctrl+Q=quit.")
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()
