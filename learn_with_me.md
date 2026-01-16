@@ -202,5 +202,3 @@ When there are placeholders:
 - Any new UI features should be isolated inside `CameraWidget`.
 
 ---
-
-If you want a walkthrough of specific functions or a diagram-based explanation, just ask.
