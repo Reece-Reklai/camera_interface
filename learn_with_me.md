@@ -1,208 +1,153 @@
-# Camera Grid App — Architecture and Deep Concepts
+# Camera Grid App — Deep Dive Guide
 
-Concepts I needed to learn for this project to be possible
+This README is a **conceptual map** of the codebase. It focuses on the complex parts: **threading, frame flow, UI rendering, hot-plug, dynamic FPS**, and more. Use it to understand how to extend or maintain the project.
 
 ---
 
-## 1) Full Program Flow Diagram
+## 1) High-level Architecture
 
-```text
-┌──────────────────────────────────────────────────────────┐
-│                          main()                          │
-│ - build QApplication + MainWindow                        │
-│ - discover cameras                                       │
-│ - build grid layout                                      │
-│ - start dynamic FPS monitor                              │
-└───────────────────────────────┬──────────────────────────┘
-                                │
-                                ▼
-┌──────────────────────────────────────────────────────────┐
-│                 find_working_cameras()                   │
-│ - scan /dev/video*                                       │
-│ - test in parallel                                       │
-│ - kill holders if blocked                                │
-└───────────────────────────────┬──────────────────────────┘
-                                │
-                                ▼
-┌──────────────────────────────────────────────────────────┐
-│               CameraWidget (per camera)                  │
-│ - UI tile + label                                        │
-│ - input handling (tap/hold)                              │
-│ - fullscreen overlay                                     │
-│ - swap logic                                             │
-│ - UI render timer                                        │
-└───────────────────────────────┬──────────────────────────┘
-                                │ creates
-                                ▼
-┌──────────────────────────────────────────────────────────┐
-│              CaptureWorker (QThread)                     │
-│ - open camera                                            │
-│ - grab/retrieve frames                                   │
-│ - emit frame_ready                                       │
-│ - reconnect on failure                                   │
-└───────────────────────────────┬──────────────────────────┘
-                                │ emits (signal)
-                                ▼
-┌──────────────────────────────────────────────────────────┐
-│         CameraWidget.on_frame(frame)                     │
-│ - store _latest_frame                                    │
-└───────────────────────────────┬──────────────────────────┘
-                                │ timer tick (UI FPS)
-                                ▼
-┌──────────────────────────────────────────────────────────┐
-│         CameraWidget._render_latest_frame()              │
-│ - convert frame -> QImage -> QPixmap                     │
-│ - display on grid or fullscreen overlay                  │
-└───────────────────────────────┬──────────────────────────┘
-                                │
-                                ▼
-┌──────────────────────────────────────────────────────────┐
-│                FullscreenOverlay (opt)                   │
-│ - show single camera                                     │
-│ - click to exit                                          │
-└──────────────────────────────────────────────────────────┘
+The application is split into **three core layers**:
+
+1. **Capture Layer (background threads)**
+   - `CaptureWorker(QThread)`
+   - Talks to OpenCV (`cv2.VideoCapture`)
+   - Pulls frames continuously without blocking the UI
+
+2. **Rendering Layer (UI thread)**
+   - `CameraWidget` renders latest frame in a `QLabel`
+   - A `QTimer` controls how often the UI updates (UI FPS)
+
+3. **Orchestration Layer (main app)**
+   - `main()` builds the grid, manages discovery and hot-plugging
+   - Dynamic FPS tuning is managed by periodic checks
+
+---
+
+## 2) Frame Lifecycle (Capture → UI)
+
+**Frames are captured in a background thread**, then passed into the UI:
+
+```
+CaptureWorker.run()  
+  -> grab() / retrieve() frame  
+  -> emit frame_ready(frame)  
+CameraWidget.on_frame(frame)  
+  -> store as _latest_frame  
+CameraWidget._render_latest_frame()  
+  -> QImage -> QPixmap -> QLabel  
 ```
 
----
-
-## 2) Signals vs Threads Diagram (Visual)
-
-```text
-THREAD MODEL (Qt)
-
-UI THREAD (Main Thread)                        WORKER THREAD (CaptureWorker)
-──────────────────────────────────             ───────────���─────────────────
-QApplication event loop                         CaptureWorker.run()
-CameraWidget                                   Open camera
-QTimers (render + fps log)                      grab() + retrieve()
-on_frame() slot                                frame_ready.emit(frame)
-
-            ┌──────────────────────────────────────────────────────────────┐
-            │             Qt Signal/Slot Boundary (Thread-Safe)            │
-            └──────────────────────────────────────────────────────────────┘
-
-frame_ready (signal)  ─────────────────────────────────────────────►  on_frame (slot)
-                                                                  (executes in UI thread)
-
-IMPORTANT:
-- The worker never touches the UI.
-- The UI never blocks on camera reads.
-- Signals transfer ownership safely across threads.
-```
+### Why this is important
+- Capturing frames in the UI thread would freeze the interface.
+- Storing only the **latest frame** prevents backlog and latency.
 
 ---
 
-## 3) Deep Explanation of Core Concepts
+## 3) Threading Model (Critical Concept)
 
-### A) Threads (CaptureWorker)
-Camera I/O is slow and blocking, so each camera runs inside a QThread (`CaptureWorker`).  
-This prevents the UI from freezing while frames are being captured.
+### CaptureWorker (QThread)
+- Runs in its own thread
+- Keeps the camera alive
+- Emits frames safely using Qt signals
 
-Key design:
-- Worker thread only captures.
-- UI thread only renders.
+### UI Thread
+- Receives signals via `pyqtSignal`
+- Renders frames on a timer
 
----
-
-### B) Signals and Slots (Thread-Safe Bridge)
-When the worker emits:
-
-```python
-self.frame_ready.emit(frame)
-```
-
-Qt delivers that signal to the UI thread:
-
-```python
-self.worker.frame_ready.connect(self.on_frame)
-```
-
-That means `on_frame()` always runs in the UI thread even though the frame is produced in another thread. This is the correct and safe way to move data across threads in Qt.
+**Key rule:** UI updates must happen on the UI thread.  
+Qt’s signal-slot system ensures thread-safe transfers.
 
 ---
 
-### C) Frame Flow Pipeline
-Actual data flow:
+## 4) FPS Control (Two Layers)
 
-1. Worker grabs and retrieves frame from OpenCV  
-2. Worker emits `frame_ready(frame)`  
-3. UI slot `on_frame()` stores it as `_latest_frame`  
-4. UI timer renders the most recent frame into the QLabel  
+There are **two FPS values**:
 
-This avoids rendering too often and keeps UI responsive.
+| Type | Purpose |
+|------|---------|
+| Capture FPS | How fast the camera captures frames |
+| UI FPS | How fast frames are rendered |
 
----
+This lets you capture at high FPS but render slower to reduce UI load.
 
-### D) UI Rendering and QTimer
-Instead of rendering on every camera frame, the UI uses a timer:
-
-```python
-self.render_timer.timeout.connect(self._render_latest_frame)
-```
-
-This keeps rendering stable at a chosen UI FPS (e.g., 15), even if the camera captures at 30+ FPS.
+**Dynamic FPS tuning** can reduce Capture FPS when system load is high.
 
 ---
 
-### E) Fullscreen Overlay
-Fullscreen is handled by a separate fullscreen widget (`FullscreenOverlay`).  
-The camera tile stays in the grid, but the fullscreen overlay shows the same frames.
+## 5) Dynamic Performance Tuning
 
-This avoids complex reparenting and keeps rendering consistent.
+The system monitors:
 
----
+- CPU load average
+- CPU temperature
 
-### F) Swap Logic
-Swapping works by:
-- Tracking which tile is selected (long press)
-- Reordering widgets inside the grid layout
-- Keeping widget contents intact
+When stressed:
+- FPS is reduced gradually (`-2`)
+When stable:
+- FPS is restored gradually (`+2`)
 
-Only their positions change, not the camera streams.
-
----
-
-### G) Dynamic FPS Tuning
-A system stress monitor reduces camera FPS when CPU load or temperature is high.  
-When the system stabilizes, FPS is restored.  
-This keeps the app stable on low-power devices.
+This is controlled by:
+- `DYNAMIC_FPS_ENABLED`
+- `PERF_CHECK_INTERVAL_MS`
+- `STRESS_HOLD_COUNT` / `RECOVER_HOLD_COUNT`
 
 ---
 
-## 4) Quick Summary
+## 6) Swap + Fullscreen UI Behavior
 
-- Capture runs in worker threads.
-- UI rendering runs only in the main thread.
-- Signals move frames safely across threads.
-- Render timer controls UI FPS separately from capture FPS.
-- Fullscreen uses overlay, not reparenting.
-- Swap logic reorders grid positions.
-- Dynamic FPS protects system stability.
+### Short click
+- Toggle fullscreen
+
+### Long press (>= 400ms)
+- Enter swap mode (yellow border)
+
+### Second click
+- Swap two tiles
+
+All of this logic is contained in:
+- `CameraWidget._handle_release_as_left_click()`
 
 ---
 
-# I hate coding sometimes . . .
+## 7) Hot-plugging / Device Rescan
 
-### OpenCV color order
-OpenCV gives BGR, but Qt expects RGB. If you forget conversion, colors look wrong.
+When there are placeholders:
+- The app rescans `/dev/video*` every 5 seconds
+- New cameras are attached to empty slots
+- Failed devices are throttled by a cooldown timer
 
-### QImage lifetime
-If you build a QImage from a temporary NumPy buffer, the memory can be freed early. You must ensure the buffer stays alive or deep-copy.
+---
 
-### Thread shutdown
-QThread must be stopped cleanly. If you quit the app while capture is running, you can get crashes or hanging threads.
+## 8) Important Extension Points
 
-### Camera re-open loops
-Some cameras fail after disconnects. You need a retry delay or backoff, or you can hammer the device.
+### Add a new layout strategy
+- Modify `get_smart_grid()`
 
-### Widget resizing
-If you don’t keep aspect ratio when scaling, previews stretch. If you do keep it, you need to handle black bars.
+### Add custom camera settings
+- Extend `CaptureWorker._open_capture()`
 
-### Fullscreen overlay focus
-A fullscreen widget can steal focus and prevent clicks on the underlying grid until it’s closed.
+### Add overlays / OSD
+- Modify `_render_latest_frame()` (before creating pixmap)
 
-### Swap state edge cases
-If swap-select is active and the user clicks the same tile again, you must handle “cancel” properly.
+---
 
-### FPS timer drift
-If your timer interval is too low, the UI can drift or lag under load. Use a stable interval and measure actual FPS.
+## 9) Code Reading Guide (Recommended Order)
+
+1. `main()` — how the app is assembled
+2. `CameraWidget` — UI + interaction
+3. `CaptureWorker` — threading + capture
+4. Camera discovery functions
+5. Dynamic FPS functions
+
+---
+
+## 10) Contribution Tips
+
+- **Never block the UI thread** with I/O or camera calls.
+- Use Qt signals for thread-safe communication.
+- Keep the capture loop minimal to avoid frame lag.
+- Any new UI features should be isolated inside `CameraWidget`.
+
+---
+
+If you want a walkthrough of specific functions or a diagram-based explanation, just ask.
