@@ -1,4 +1,4 @@
-# Camera Grid = Raspberry Pi Setup (Manual Run)
+# Camera Dashboard
 
 ## Supported OS
 - Raspberry Pi 4/5 (64‑bit recommended)
