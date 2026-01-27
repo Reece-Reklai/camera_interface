@@ -1278,16 +1278,7 @@ def safe_cleanup(widgets):
 
 def choose_profile(camera_count):
     """Pick capture resolution and FPS based on camera count (Pi-optimized)."""
-    if IS_RASPBERRY_PI:
-        if camera_count >= 3:
-            return 320, 240, 10, 10  # Low res, low FPS for 3+ cameras
-        elif camera_count == 2:
-            return 480, 360, 15, 15
-        else:
-            return 640, 480, 20, 15
-    else:
-        # Non-Pi defaults
-        return 640, 480, 20, 30
+    return 640, 480, 15, 24
 
 # ============================================================
 # MAIN ENTRYPOINT
