@@ -25,7 +25,7 @@ python3 main.py
 
 ## Key Features
 
-### 🎥 **Multi-Camera Support**
+### **Multi-Camera Support**
 - Automatically detects and displays up to 3 USB cameras simultaneously
 - Smart grid layout adapts to available camera count
 - Hot-plugging support - cameras can be connected/disconnected at runtime
