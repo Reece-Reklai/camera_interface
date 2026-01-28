@@ -1146,12 +1146,12 @@ def safe_cleanup(widgets):
             pass
     _frame_pool.clear()
 
-def choose_profile(camera_count):
+def choose_profile():
     """Pick capture resolution, FPS, and downsample based on camera count."""
     return {
         'capture_size': (640, 480),
         'capture_fps': 20,
-        'ui_fps': 20,
+        'ui_fps': 25,
         'downsample_max_dim': 640,
     }
 
@@ -1235,8 +1235,7 @@ def main():
     )
     all_widgets.append(settings_tile)
 
-    active_camera_count = max(1, min(len(working_cameras), CAMERA_SLOT_COUNT))
-    profile = choose_profile(active_camera_count)
+    profile = choose_profile()
     cap_w, cap_h = profile['capture_size']
     cap_fps = profile['capture_fps']
     ui_fps = profile['ui_fps']
