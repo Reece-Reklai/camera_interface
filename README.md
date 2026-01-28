@@ -146,24 +146,6 @@ The top-left tile provides:
 
 ### Core Components
 
-```mermaid
-graph TB
-    A[Main Application] --> B[Camera Discovery]
-    A --> C[Grid Layout Manager]
-    A --> D[Performance Monitor]
-
-    C --> E[CameraWidget 1]
-    C --> F[CameraWidget 2]
-    C --> G[CameraWidget 3]
-
-    E --> H[CaptureWorker Thread]
-    F --> I[CaptureWorker Thread]
-    G --> J[CaptureWorker Thread]
-
-    H --> K[OpenCV VideoCapture]
-    I --> L[OpenCV VideoCapture]
-    J --> M[OpenCV VideoCapture]
-```
 
 ### Threading Model
 
@@ -276,8 +258,6 @@ python3 main.py 2>&1 | grep FPS
 
 ---
 
-## 🤝 Contributing
-
 ### Development Setup
 
 ```bash
@@ -313,7 +293,7 @@ python3 -c "from PyQt6 import QtWidgets; print('PyQt6 OK')"
 
 ## 📊 Performance Metrics
 
-### Raspberry Pi 4 Benchmarks
+### Raspberry Pi 5 Benchmarks
 | Cameras | Resolution | FPS | CPU Usage | Memory |
 |---------|------------|-----|-----------|---------|
 | 1 | 640x480 | 30 | 15% | 120MB |
