@@ -19,8 +19,6 @@ source .venv/bin/activate
 python3 main.py
 ```
 
-*One-click installation script handles all dependencies and permissions.*
-
 ---
 
 ## Key Features
