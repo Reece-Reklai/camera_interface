@@ -6,7 +6,7 @@ A multi-camera surveillance dashboard built with Python and PyQt6, optimized for
 ![Platform](https://img.shields.io/badge/Platform-Linux-lightgrey.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 
-## 🚀 Quick Start
+## Quick Start
 
 ```bash
 # Clone and install
@@ -24,31 +24,31 @@ python3 main.py
 
 ---
 
-## ✨ Key Features
+## Key Features
 
 ### 🎥 **Multi-Camera Support**
 - Automatically detects and displays up to 3 USB cameras simultaneously
 - Smart grid layout adapts to available camera count
 - Hot-plugging support - cameras can be connected/disconnected at runtime
 
-### 🎯 **Interactive Interface**
+### **Interactive Interface**
 - **Touch/Mouse Controls**: Single click to fullscreen, long press to swap camera positions
 - **Drag & Drop**: Reorganize camera layout with intuitive gestures
 - **Responsive Design**: Scales beautifully across different screen sizes
 
-### ⚡ **Performance Optimized**
+### **Performance Optimized**
 - **Dynamic FPS Adjustment**: Automatically reduces frame rate when CPU load or temperature is high
 - **Threaded Architecture**: Separate capture threads ensure smooth UI performance
 - **Resource Management**: Efficient memory usage with frame buffering
 
-### 🔧 **System Integration**
+### **System Integration**
 - **Zero-Configuration**: Works out of the box with standard USB cameras
 - **Cross-Platform**: Optimized for Raspberry Pi but runs on any Linux system
 - **Robust Error Handling**: Automatic camera reconnection with exponential backoff
 
 ---
 
-## 📋 System Requirements
+## System Requirements
 
 ### Supported Platforms
 - **Raspberry Pi 4/5** (64-bit recommended)
@@ -66,7 +66,7 @@ python3 main.py
 
 ---
 
-## 🛠️ Installation Guide
+## Step-By-Step Installation
 
 ### Option 1: Automated Installation (Recommended)
 
@@ -119,7 +119,7 @@ sudo usermod -aG video $USER
 
 ---
 
-## 🎮 Usage Guide
+## Usage Design
 
 ### Basic Controls
 | Action | Result |
@@ -143,7 +143,7 @@ The top-left tile provides:
 
 ---
 
-## 🏗️ Architecture Overview
+## Architecture Overview
 
 ### Core Components
 
@@ -181,7 +181,7 @@ graph TB
 
 ---
 
-## 🔧 Configuration
+## Configuration
 
 ### Environment Variables
 ```bash
@@ -208,7 +208,7 @@ FAILED_CAMERA_COOLDOWN_SEC = 30 # Retry delay for failed cameras
 
 ---
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Common Issues
 
@@ -329,7 +329,7 @@ python3 -c "from PyQt6 import QtWidgets; print('PyQt6 OK')"
 
 ---
 
-## 📚 Technical Documentation
+## Technical Documentation
 
 For deep technical insights, see [learn_with_me.md](learn_with_me.md) which covers:
 - Detailed threading architecture
@@ -339,26 +339,16 @@ For deep technical insights, see [learn_with_me.md](learn_with_me.md) which cove
 
 ---
 
-## 📜 License
+## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - **OpenCV** team for excellent computer vision library
 - **PyQt6** for robust cross-platform GUI framework  
 - **Raspberry Pi Foundation** for making computing accessible
 
 ---
-
-## 📞 Support
-
-- **Issues**: Report bugs via GitHub Issues
-- **Features**: Request enhancements via Discussions
-- **Questions**: Check existing documentation first
-
----
-
-*Built with ❤️ for the maker community and surveillance professionals.*
