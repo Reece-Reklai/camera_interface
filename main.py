@@ -242,6 +242,13 @@ class CaptureWorker(QThread):
             except Exception:
                 pass
 
+            # Try to prevent blocking reads on flaky cameras.
+            try:
+                cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 2000)
+                cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 2000)
+            except Exception:
+                pass
+
             # Request FPS; 0 may let camera choose.
             try:
                 if self._target_fps and self._target_fps > 0:
