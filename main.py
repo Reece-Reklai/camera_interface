@@ -454,13 +454,13 @@ class CameraWidget(QtWidgets.QWidget):
 
             layout.addStretch(1)
             layout.addWidget(self.video_label)
-            layout.addSpacing(12)
+            layout.addSpacing(20)
             layout.addWidget(
                 restart_button, alignment=Qt.AlignmentFlag.AlignCenter)
-            layout.addSpacing(8)
+            layout.addSpacing(16)
             layout.addWidget(
                 night_mode_button, alignment=Qt.AlignmentFlag.AlignCenter)
-            layout.addSpacing(8)
+            layout.addSpacing(16)
             layout.addWidget(
                 exit_button, alignment=Qt.AlignmentFlag.AlignCenter)
             layout.addStretch(1)
