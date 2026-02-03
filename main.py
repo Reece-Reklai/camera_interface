@@ -969,6 +969,7 @@ class CameraWidget(QtWidgets.QWidget):
         except Exception:
             logging.exception("render frame")
 
+
     @pyqtSlot(bool)
     def on_status_changed(self, online):
         """Update UI when camera goes online or offline."""
