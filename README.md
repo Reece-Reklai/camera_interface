@@ -9,8 +9,8 @@ A multi-camera monitoring system optimized for Raspberry Pi, designed for blind-
 ## Quick Start
 
 ```bash
-# Clone and install (replace with your repository URL)
-git clone https://github.com/your-username/camera_dashboard.git
+# Clone and install
+git clone https://github.com/Reece-Reklai/camera_dashboard.git
 cd camera_dashboard
 chmod +x install.sh
 ./install.sh
@@ -20,30 +20,32 @@ source .venv/bin/activate
 python3 main.py
 ```
 
-> **Note**: Replace the clone URL with your actual repository URL, or download the source directly.
-
 ---
 
 ## Features
 
 ### Multi-Camera Support
+
 - Automatically detects and displays up to 3 USB cameras simultaneously
 - Smart grid layout adapts to available camera count
 - Hot-plug support - cameras can be connected/disconnected at runtime
 
 ### Interactive Interface
+
 - **Touch/Mouse Controls**: Single tap/click for fullscreen, long press to swap positions
 - **Swap Mode**: Reorganize camera layout with intuitive gestures
 - **Night Mode**: Toggle enhanced visibility for low-light conditions
 - **Settings Tile**: Quick access to restart, night mode, and exit
 
 ### Performance Optimized
+
 - **GStreamer Pipeline**: Hardware-accelerated MJPEG decoding (with V4L2 fallback)
 - **Dynamic FPS Adjustment**: Automatically reduces frame rate under CPU/thermal stress
 - **Threaded Architecture**: Separate capture threads ensure smooth UI performance
 - **Efficient Rendering**: 15 FPS UI refresh rate balances smoothness and CPU usage
 
 ### System Integration
+
 - **Systemd Service**: Auto-start on boot with watchdog monitoring
 - **Zero Configuration**: Works out of the box with standard USB cameras
 - **Robust Recovery**: Automatic camera reconnection with exponential backoff
@@ -53,16 +55,19 @@ python3 main.py
 ## System Requirements
 
 ### Supported Platforms
+
 - **Raspberry Pi 5** (recommended)
 - **Raspberry Pi 4** (64-bit OS recommended)
 - **Linux** (Ubuntu 22.04+, Debian 12+)
 
 ### Hardware
+
 - USB webcams compatible with V4L2 (MJPEG support recommended)
 - Minimum 2GB RAM (4GB+ recommended for 3 cameras)
 - Display with X11 or Wayland
 
 ### Software Dependencies
+
 - Python 3.8+
 - PyQt6 (Qt6 GUI framework)
 - OpenCV (with GStreamer support)
@@ -81,6 +86,7 @@ chmod +x install.sh
 ```
 
 The installer will:
+
 1. Update system packages
 2. Install system dependencies (PyQt6, OpenCV, GStreamer)
 3. Create a Python virtual environment with system-site-packages
@@ -93,11 +99,13 @@ The installer will:
 <summary>Click to expand manual steps</summary>
 
 #### 1. Update System
+
 ```bash
 sudo apt update && sudo apt upgrade -y
 ```
 
 #### 2. Install System Dependencies
+
 ```bash
 sudo apt install -y \
   python3 python3-pip python3-venv \
@@ -110,6 +118,7 @@ sudo apt install -y \
 ```
 
 #### 3. Create Virtual Environment
+
 ```bash
 # Use --system-site-packages to access system PyQt6/OpenCV
 python3 -m venv --system-site-packages .venv
@@ -117,12 +126,14 @@ source .venv/bin/activate
 ```
 
 #### 4. Fix Camera Permissions
+
 ```bash
 sudo usermod -aG video $USER
 # Log out and back in for changes to take effect
 ```
 
 #### 5. Create Logs Directory
+
 ```bash
 mkdir -p logs
 ```
@@ -147,24 +158,25 @@ sudo systemctl status camera-dashboard
 
 ### Controls
 
-| Action | Result |
-|--------|--------|
-| **Short Click/Tap** | Toggle fullscreen view |
-| **Long Press (400ms+)** | Enter swap mode (yellow border) |
+| Action                   | Result                              |
+| ------------------------ | ----------------------------------- |
+| **Short Click/Tap**      | Toggle fullscreen view              |
+| **Long Press (400ms+)**  | Enter swap mode (yellow border)     |
 | **Click Another Camera** | Swap positions with selected camera |
-| **Q or Ctrl+Q** | Exit application |
-| **Ctrl+C** | Exit from terminal |
+| **Q or Ctrl+Q**          | Exit application                    |
+| **Ctrl+C**               | Exit from terminal                  |
 
 ### Camera Status Indicators
 
-| Border Color | Status |
-|--------------|--------|
-| Gray | Camera connected and streaming |
-| Yellow | Camera selected for swapping |
-| "DISCONNECTED" | No camera detected in slot |
-| "CONNECTING..." | Camera being initialized |
+| Border Color    | Status                         |
+| --------------- | ------------------------------ |
+| Gray            | Camera connected and streaming |
+| Yellow          | Camera selected for swapping   |
+| "DISCONNECTED"  | No camera detected in slot     |
+| "CONNECTING..." | Camera being initialized       |
 
 ### Settings Tile (Top-Left)
+
 - **Restart**: Restart the application
 - **Nightmode**: Toggle night vision mode (red-tinted, enhanced brightness)
 - **Exit**: Close the application
@@ -243,6 +255,7 @@ sudo systemctl disable camera-dashboard
 ```
 
 ### Service Features
+
 - **Auto-restart**: Restarts on crash (2-second delay)
 - **Watchdog**: 15-second watchdog timeout with health pings
 - **Nice Priority**: Runs at elevated priority (-5)
@@ -255,12 +268,13 @@ sudo systemctl disable camera-dashboard
 ### Raspberry Pi 5 Benchmarks
 
 | Cameras | Resolution | Capture FPS | UI FPS | CPU Usage | Memory |
-|---------|------------|-------------|--------|-----------|--------|
-| 1 | 640x480 | 20 | 15 | ~15% | ~150MB |
-| 2 | 640x480 | 20 | 15 | ~25% | ~180MB |
-| 3 | 640x480 | 20 | 15 | ~35% | ~200MB |
+| ------- | ---------- | ----------- | ------ | --------- | ------ |
+| 1       | 640x480    | 20          | 15     | ~15%      | ~150MB |
+| 2       | 640x480    | 20          | 15     | ~25%      | ~180MB |
+| 3       | 640x480    | 20          | 15     | ~35%      | ~200MB |
 
 ### Optimizations Applied
+
 - **GStreamer Pipeline**: More efficient MJPEG decoding than raw V4L2
 - **Render Overhead Compensation**: Timer adjusted to hit target FPS accurately
 - **Longer Rescan Interval**: 15s vs 5s reduces background CPU usage
@@ -268,6 +282,7 @@ sudo systemctl disable camera-dashboard
 - **BGR888 Direct Rendering**: No color conversion needed for Qt display
 
 ### Dynamic FPS Behavior
+
 1. **Normal**: Maintains target FPS (20 capture, 15 UI)
 2. **High CPU (>75%)**: Gradually reduces FPS
 3. **High Temp (>70°C)**: Immediately reduces FPS
@@ -346,11 +361,13 @@ DEBUG_PRINTS=true python3 main.py
 ```
 
 ### Threading Model
+
 - **Main Thread**: Qt event loop, UI rendering
 - **Capture Threads**: One QThread per camera for frame capture
 - **Timer Callbacks**: Performance monitoring, health logging, device rescanning
 
 ### Data Flow
+
 1. `CaptureWorker` grabs frames via GStreamer or V4L2
 2. Frames emitted to main thread via Qt signals
 3. UI renders at fixed interval (15 FPS) using latest frame
@@ -381,11 +398,3 @@ camera_dashboard/
 This project is licensed under the MIT License - see [LICENSE.MIT](LICENSE.MIT) for details.
 
 ---
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
