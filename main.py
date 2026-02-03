@@ -39,6 +39,7 @@ import re
 # ============================================================
 # DEBUG_PRINTS = True
 DEBUG_PRINTS = False
+UI_FPS_LOGGING = False
 
 
 def dprint(*args, **kwargs):
@@ -63,7 +64,7 @@ logging.basicConfig(level=logging.INFO,
 DYNAMIC_FPS_ENABLED = True
 PERF_CHECK_INTERVAL_MS = 2000
 MIN_DYNAMIC_FPS = 5
-CPU_LOAD_THRESHOLD = 0.85   # 85% avg load
+CPU_LOAD_THRESHOLD = 0.75   # 75% avg load
 CPU_TEMP_THRESHOLD_C = 70.0  # Celsius
 STRESS_HOLD_COUNT = 2       # consecutive checks before reducing fps
 RECOVER_HOLD_COUNT = 3      # consecutive checks before increasing fps
@@ -843,10 +844,10 @@ class CameraWidget(QtWidgets.QWidget):
             if self.night_mode_enabled:
                 try:
                     if frame_bgr.ndim == 2:
-                        gray = cv2.equalizeHist(frame_bgr)
+                        gray = cv2.convertScaleAbs(frame_bgr, alpha=1.6, beta=0)
                     else:
                         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-                        gray = cv2.equalizeHist(gray)
+                        gray = cv2.convertScaleAbs(gray, alpha=1.6, beta=0)
                     frame_bgr = cv2.merge((gray * 0, gray * 0, gray))
                 except Exception:
                     pass
@@ -906,6 +907,8 @@ class CameraWidget(QtWidgets.QWidget):
 
     def _print_fps(self):
         """Log rendering FPS for this widget."""
+        if not UI_FPS_LOGGING:
+            return
         try:
             now = time.time()
             elapsed = now - self.prev_time
@@ -1184,7 +1187,7 @@ def safe_cleanup(widgets):
 
 def choose_profile(camera_count):
     """Pick capture resolution and FPS based on camera count."""
-    return 640, 480, 20, 20
+    return 640, 480, 20, 15
 
 # ============================================================
 # MAIN ENTRYPOINT
