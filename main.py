@@ -433,7 +433,9 @@ class CameraWidget(QtWidgets.QWidget):
             self.video_label.setText(self.placeholder_text or "SETTINGS")
             self.video_label.setStyleSheet("color: #ffffff; font-size: 20px;")
 
-            button_style = "QPushButton { padding: 10px 16px; font-size: 18px; min-width: 100px; }"
+            button_style = (
+                "QPushButton { padding: 16px 28px; font-size: 22px; min-width: 160px; min-height: 56px; }"
+            )
 
             restart_button = QtWidgets.QPushButton("Restart")
             restart_button.setStyleSheet(button_style)
