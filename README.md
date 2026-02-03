@@ -243,66 +243,10 @@ FAILED_CAMERA_COOLDOWN_SEC = 30 # Retry delay for failed cameras
 
 </details>
 
-### Debug Mode
-Enable detailed logging:
-
-```python
-# In main.py, line 40
-DEBUG_PRINTS = True
-```
-
 ### Log Analysis
 ```bash
 # Monitor performance in real-time
 python3 main.py 2>&1 | grep FPS
-```
-
----
-
-## 🔒 Security Considerations
-
-### Camera Permissions
-- Application runs as normal user (not root)
-- Camera access controlled via Linux group permissions
-- No network access required for local USB cameras
-
-### Data Privacy
-- All video processing happens locally
-- No data transmitted to external services
-- Frame buffers limited to prevent memory accumulation
-
----
-
-### Development Setup
-
-```bash
-# Clone repository
-git clone <repository-url>
-cd camera_dashboard
-
-# Set up development environment
-python3 -m venv dev_venv
-source dev_venv/bin/activate
-pip install PyQt6 opencv-python pyudev
-
-# Run in development mode
-python3 main.py
-```
-
-
----
-
-## If you must run as sudo (not recommended)
-
-This can break GUI permissions and your venv, but if you must:
-
-### Testing
-```bash
-# Test camera detection
-python3 -c "import cv2; print([i for i in range(10) if cv2.VideoCapture(i).read()[0]])"
-
-# Test PyQt6 installation
-python3 -c "from PyQt6 import QtWidgets; print('PyQt6 OK')"
 ```
 
 ---
@@ -331,8 +275,6 @@ python3 -c "from PyQt6 import QtWidgets; print('PyQt6 OK')"
 - USB cameras should be visible as `/dev/video*`
 - If no cameras are found, the app will show "Disconnected"
 - Exit with Ctrl+Q or Ctrl+C in terminal or Q inside application window
-
----
 
 ## Quick Overview
 
