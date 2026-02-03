@@ -91,7 +91,7 @@ RESTART_WINDOW_SEC = 30.0
 # ============================================================
 # CAMERA RESCAN (HOT-PLUG SUPPORT)
 # ------------------------------------------------------------
-RESCAN_INTERVAL_MS = 5000
+RESCAN_INTERVAL_MS = 15000  # 15 seconds (reduced CPU usage vs 5s)
 FAILED_CAMERA_COOLDOWN_SEC = 30.0
 
 # ============================================================
@@ -104,7 +104,10 @@ KILL_DEVICE_HOLDERS = True
 PROFILE_CAPTURE_WIDTH = 640
 PROFILE_CAPTURE_HEIGHT = 480
 PROFILE_CAPTURE_FPS = 20
-PROFILE_UI_FPS = 15
+PROFILE_UI_FPS = 12  # Reduced from 15; 12 FPS is visually smooth, saves CPU
+
+# GStreamer pipeline support (more efficient on Pi)
+USE_GSTREAMER = True  # Try GStreamer first, fallback to V4L2
 
 
 def _as_bool(value, default):
@@ -233,6 +236,8 @@ def apply_config(parser):
             parser.get("performance", "restart_window_sec", fallback=RESTART_WINDOW_SEC),
             RESTART_WINDOW_SEC, min_value=5.0)
 
+    global USE_GSTREAMER
+
     if parser.has_section("camera"):
         RESCAN_INTERVAL_MS = _as_int(
             parser.get("camera", "rescan_interval_ms", fallback=RESCAN_INTERVAL_MS),
@@ -246,6 +251,9 @@ def apply_config(parser):
         KILL_DEVICE_HOLDERS = _as_bool(
             parser.get("camera", "kill_device_holders", fallback=KILL_DEVICE_HOLDERS),
             KILL_DEVICE_HOLDERS)
+        USE_GSTREAMER = _as_bool(
+            parser.get("camera", "use_gstreamer", fallback=USE_GSTREAMER),
+            USE_GSTREAMER)
 
     if parser.has_section("profile"):
         PROFILE_CAPTURE_WIDTH = _as_int(
@@ -487,10 +495,48 @@ class CaptureWorker(QThread):
     def _open_capture(self):
         """Open the camera and apply preferred capture settings."""
         try:
-            backend = cv2.CAP_ANY
-            if platform.system() == "Linux":
-                backend = cv2.CAP_V4L2
-            cap = cv2.VideoCapture(self.stream_link, backend)
+            cap = None
+            backend_name = "V4L2"
+            
+            # Try GStreamer first if enabled (more efficient MJPEG pipeline)
+            if USE_GSTREAMER and platform.system() == "Linux" and isinstance(self.stream_link, int):
+                try:
+                    w = int(self.capture_width) if self.capture_width else 640
+                    h = int(self.capture_height) if self.capture_height else 480
+                    fps = int(self._target_fps) if self._target_fps else 30
+                    # GStreamer pipeline: v4l2src -> MJPEG decode -> BGR output
+                    # Using simpler pipeline without strict format to improve compatibility
+                    pipeline = (
+                        f"v4l2src device=/dev/video{self.stream_link} ! "
+                        f"image/jpeg,width={w},height={h} ! "
+                        f"jpegdec ! videoconvert ! appsink drop=1"
+                    )
+                    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+                    if cap and cap.isOpened():
+                        # Test if we can actually grab a frame
+                        test_ret = cap.grab()
+                        if test_ret:
+                            backend_name = "GStreamer"
+                            logging.info("GStreamer pipeline opened for camera %s", self.stream_link)
+                        else:
+                            cap.release()
+                            cap = None
+                    else:
+                        if cap:
+                            cap.release()
+                        cap = None
+                except Exception as e:
+                    logging.debug("GStreamer failed for camera %s: %s", self.stream_link, e)
+                    cap = None
+            
+            # Fallback to V4L2 if GStreamer failed or not enabled
+            if cap is None:
+                backend = cv2.CAP_ANY
+                if platform.system() == "Linux":
+                    backend = cv2.CAP_V4L2
+                cap = cv2.VideoCapture(self.stream_link, backend)
+                backend_name = "V4L2"
+            
             if not cap or not cap.isOpened():
                 try:
                     cap.release()
@@ -498,40 +544,42 @@ class CaptureWorker(QThread):
                     pass
                 return
 
-            # Request MJPEG if available to reduce decode overhead.
-            try:
-                cap.set(cv2.CAP_PROP_FOURCC,
-                        cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
-            except Exception:
-                pass
+            # Only apply these settings for V4L2 backend (not needed for GStreamer)
+            if backend_name == "V4L2":
+                # Request MJPEG if available to reduce decode overhead.
+                try:
+                    cap.set(cv2.CAP_PROP_FOURCC,
+                            cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+                except Exception:
+                    pass
 
-            # Apply capture resolution when requested.
-            if self.capture_width:
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.capture_width))
-            if self.capture_height:
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.capture_height))
+                # Apply capture resolution when requested.
+                if self.capture_width:
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.capture_width))
+                if self.capture_height:
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.capture_height))
 
-            # Reduce internal buffering to keep frames current.
-            try:
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            except Exception:
-                pass
+                # Reduce internal buffering to keep frames current.
+                try:
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                except Exception:
+                    pass
 
-            # Try to prevent blocking reads on flaky cameras.
-            try:
-                cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 2000)
-                cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 2000)
-            except Exception:
-                pass
+                # Try to prevent blocking reads on flaky cameras.
+                try:
+                    cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 2000)
+                    cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 2000)
+                except Exception:
+                    pass
 
-            # Request FPS; 0 may let camera choose.
-            try:
-                if self._target_fps and self._target_fps > 0:
-                    cap.set(cv2.CAP_PROP_FPS, float(self._target_fps))
-                else:
-                    cap.set(cv2.CAP_PROP_FPS, 0)
-            except Exception:
-                pass
+                # Request FPS; 0 may let camera choose.
+                try:
+                    if self._target_fps and self._target_fps > 0:
+                        cap.set(cv2.CAP_PROP_FPS, float(self._target_fps))
+                    else:
+                        cap.set(cv2.CAP_PROP_FPS, 0)
+                except Exception:
+                    pass
 
             if cap.isOpened():
                 self._cap = cap
@@ -547,8 +595,8 @@ class CaptureWorker(QThread):
                     actual_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                     actual_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                     actual_fps = float(self._cap.get(cv2.CAP_PROP_FPS))
-                    logging.info("Camera %s format %dx%d @ %.1f FPS",
-                                 self.stream_link, actual_w, actual_h, actual_fps)
+                    logging.info("Camera %s format %dx%d @ %.1f FPS (%s)",
+                                 self.stream_link, actual_w, actual_h, actual_fps, backend_name)
                 except Exception:
                     pass
                 logging.info(
