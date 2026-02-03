@@ -489,6 +489,8 @@ class CameraWidget(QtWidgets.QWidget):
         self._frame_id = 0
         self._last_rendered_id = -1
         self._last_rendered_size = None
+        self._last_frame_ts = 0.0
+        self._stale_frame_timeout_sec = 2.0
         self._pixmap_cache = QtGui.QPixmap()
         self._scaled_pixmap_cache = None
         self._scaled_pixmap_cache_size = None
@@ -839,6 +841,7 @@ class CameraWidget(QtWidgets.QWidget):
             # Only store; UI thread renders on its timer.
             self._latest_frame = frame_bgr
             self._frame_id += 1
+            self._last_frame_ts = time.time()
         except Exception:
             logging.exception("on_frame")
 
@@ -867,6 +870,11 @@ class CameraWidget(QtWidgets.QWidget):
             if frame_bgr is None:
                 self._render_placeholder(
                     self.placeholder_text or "DISCONNECTED")
+                return
+
+            if self._last_frame_ts and (time.time() - self._last_frame_ts) > self._stale_frame_timeout_sec:
+                self._latest_frame = None
+                self._render_placeholder("DISCONNECTED")
                 return
 
             if self.is_fullscreen and self._fs_overlay:
