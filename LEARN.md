@@ -23,6 +23,17 @@ This guide is designed to help you **truly understand** this codebase - not just
 10. [Exercises to Solidify Understanding](#10-exercises-to-solidify-understanding)
 11. [What Senior Developers Know](#11-what-senior-developers-know)
 12. [Resources for Continued Learning](#12-resources-for-continued-learning)
+13. [Git & Version Control](#13-git--version-control)
+14. [Error Handling Philosophy](#14-error-handling-philosophy)
+15. [Memory Management](#15-memory-management)
+16. [Testing Strategies](#16-testing-strategies)
+17. [Code Organization](#17-code-organization)
+18. [Security Considerations](#18-security-considerations)
+19. [Performance Profiling](#19-performance-profiling)
+20. [The Python GIL](#20-the-python-gil-global-interpreter-lock)
+21. [Common Pitfalls](#21-common-pitfalls)
+22. [Real-World Development Workflow](#22-real-world-development-workflow)
+23. [API Design Principles](#23-api-design-principles)
 
 ---
 
@@ -1112,6 +1123,802 @@ result = transformed[:max_count]
 - **Book**: "Python Concurrency with asyncio" by Matthew Fowler
 - **Course**: Real Python threading tutorials
 - **Practice**: Build a web scraper with threads
+
+---
+
+## 13. Git & Version Control
+
+### Why Version Control Matters
+
+Without Git:
+```
+main.py
+main_backup.py
+main_backup2.py
+main_final.py
+main_final_REAL.py
+main_final_REAL_v2.py  # Which one is current?!
+```
+
+With Git:
+```
+main.py  # Always current, history is tracked
+```
+
+### Essential Git Concepts
+
+```bash
+# Initialize a repository
+git init
+
+# Check what's changed
+git status
+
+# Stage changes (prepare for commit)
+git add main.py           # Add specific file
+git add .                 # Add everything
+
+# Commit (save a checkpoint)
+git commit -m "Add GStreamer support for better performance"
+
+# View history
+git log --oneline
+
+# See what changed
+git diff                  # Unstaged changes
+git diff --staged         # Staged changes
+```
+
+### Branching (How Teams Work)
+
+```bash
+# Create a branch for a new feature
+git checkout -b feature/motion-detection
+
+# Work on your feature...
+git add .
+git commit -m "Add motion detection algorithm"
+
+# Switch back to main
+git checkout main
+
+# Merge your feature
+git merge feature/motion-detection
+```
+
+**Why branches?**
+- Main branch stays stable
+- Experiment without breaking things
+- Multiple people can work simultaneously
+
+### Commit Messages That Don't Suck
+
+```bash
+# BAD
+git commit -m "fix"
+git commit -m "updates"
+git commit -m "asdfasdf"
+
+# GOOD
+git commit -m "Fix camera reconnection failing after USB disconnect"
+git commit -m "Add dynamic FPS adjustment based on CPU temperature"
+git commit -m "Refactor CaptureWorker to use GStreamer pipeline"
+```
+
+**Format**: `<verb> <what> <why/context>`
+- fix: Bug fixes
+- Add: New features
+- Update: Changes to existing features
+- Refactor: Code restructuring (no behavior change)
+- Remove: Deleting code/features
+
+### .gitignore
+
+Files that should NOT be in version control:
+
+```gitignore
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs and runtime files
+logs/
+*.log
+
+# Secrets (NEVER commit these!)
+.env
+credentials.json
+*_secret*
+```
+
+---
+
+## 14. Error Handling Philosophy
+
+### The Exception Hierarchy
+
+```
+BaseException
+ └── Exception
+      ├── ValueError      (wrong value)
+      ├── TypeError       (wrong type)
+      ├── FileNotFoundError
+      ├── ConnectionError
+      └── ... many more
+```
+
+### When to Catch vs Let Crash
+
+```python
+# CATCH: Expected failures you can recover from
+try:
+    cap = cv2.VideoCapture(device_id)
+except Exception as e:
+    logging.error("Camera open failed: %s", e)
+    self._show_placeholder("DISCONNECTED")
+    # Continue running, try again later
+
+# DON'T CATCH: Programming errors (fix the code instead!)
+def process_frame(frame):
+    # Don't wrap this in try/except
+    # If frame is None, that's a bug - let it crash so you find it
+    height, width = frame.shape[:2]
+```
+
+### The Right Way to Handle Exceptions
+
+```python
+# BAD: Catches everything, hides bugs
+try:
+    do_something()
+except:  # Bare except - NEVER do this
+    pass
+
+# BAD: Too broad
+try:
+    do_something()
+except Exception:
+    pass  # Silently ignores all errors
+
+# GOOD: Specific exceptions, proper handling
+try:
+    frame = cap.read()
+except cv2.error as e:
+    logging.warning("OpenCV error: %s", e)
+    return None
+except IOError as e:
+    logging.error("IO error reading camera: %s", e)
+    self._reconnect()
+    return None
+```
+
+### Logging Exceptions Properly
+
+```python
+# BAD: Loses stack trace
+except Exception as e:
+    logging.error(f"Error: {e}")
+
+# GOOD: Includes full stack trace
+except Exception as e:
+    logging.exception("Failed to process frame")
+    # logging.exception automatically includes traceback
+```
+
+### Finally Blocks
+
+```python
+# Cleanup ALWAYS runs
+cap = cv2.VideoCapture(0)
+try:
+    while True:
+        frame = cap.read()
+        process(frame)
+except KeyboardInterrupt:
+    logging.info("User requested stop")
+finally:
+    cap.release()  # Always runs, even if exception
+    logging.info("Camera released")
+```
+
+---
+
+## 15. Memory Management
+
+### How Python Manages Memory
+
+```python
+# Python uses reference counting + garbage collection
+frame = capture_frame()  # Reference count = 1
+display(frame)           # Still 1 (passed by reference)
+frame = None             # Reference count = 0 → memory freed
+```
+
+### NumPy Arrays (Special Case)
+
+Frames are NumPy arrays - large blocks of memory:
+
+```python
+# A 640x480 RGB frame = 640 * 480 * 3 = 921,600 bytes (~1MB)
+frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+# DANGER: Shallow copy shares memory
+frame2 = frame          # Same memory!
+frame2[0, 0] = 255      # Modifies frame too!
+
+# SAFE: Deep copy
+frame2 = frame.copy()   # New memory allocation
+```
+
+### Memory Leaks in Our Code
+
+```python
+# LEAK: Storing frames without limit
+class BadWidget:
+    def __init__(self):
+        self.frame_history = []
+    
+    def on_frame(self, frame):
+        self.frame_history.append(frame)  # Grows forever!
+
+# CORRECT: Only keep latest
+class GoodWidget:
+    def on_frame(self, frame):
+        self._latest_frame = frame  # Overwrites, constant memory
+```
+
+### Monitoring Memory
+
+```bash
+# Watch memory usage
+watch -n1 'ps aux | grep python3'
+
+# Detailed memory breakdown
+python3 -c "import tracemalloc; tracemalloc.start(); exec(open('main.py').read())"
+```
+
+---
+
+## 16. Testing Strategies
+
+### Why Testing Matters
+
+Without tests:
+- "I think it works"
+- Change one thing → break something else
+- Fear of refactoring
+
+With tests:
+- "I know it works - tests pass"
+- Change one thing → tests catch breakage
+- Confident refactoring
+
+### Types of Tests
+
+```python
+# 1. UNIT TEST: Test one function in isolation
+def test_as_int_valid():
+    assert _as_int("42", 0) == 42
+
+def test_as_int_invalid():
+    assert _as_int("not a number", 0) == 0
+
+def test_as_int_bounds():
+    assert _as_int("100", 0, max_value=50) == 50
+
+
+# 2. INTEGRATION TEST: Test components working together
+def test_config_loading():
+    _load_config("./config.ini")
+    assert PROFILE_UI_FPS == 15
+    assert PROFILE_CAPTURE_FPS == 20
+
+
+# 3. END-TO-END TEST: Test the whole system
+def test_app_starts_without_cameras():
+    """App should show placeholders when no cameras connected"""
+    app = QApplication([])
+    window = CameraGrid()
+    # Assert placeholders are shown
+    app.quit()
+```
+
+### Testing Without Hardware
+
+```python
+# Mock the camera
+from unittest.mock import Mock, patch
+
+def test_capture_worker_emits_frames():
+    # Create a fake camera that returns a test frame
+    mock_cap = Mock()
+    mock_cap.read.return_value = (True, np.zeros((480, 640, 3)))
+    
+    with patch('cv2.VideoCapture', return_value=mock_cap):
+        worker = CaptureWorker(0)
+        # Test that worker emits frames...
+```
+
+### Running Tests
+
+```bash
+# Install pytest
+pip install pytest
+
+# Run all tests
+pytest
+
+# Run with verbose output
+pytest -v
+
+# Run specific test file
+pytest test_main.py
+
+# Run tests matching a pattern
+pytest -k "test_config"
+```
+
+---
+
+## 17. Code Organization
+
+### Why One File Can Be Okay
+
+Our `main.py` is ~1800 lines. Is that bad?
+
+**Pros of single file:**
+- Easy to deploy (copy one file)
+- No import issues
+- Easy to read top-to-bottom
+
+**Cons:**
+- Hard to navigate
+- Can't reuse components
+- Merge conflicts in teams
+
+**When to split:**
+- File exceeds ~2000 lines
+- Clear module boundaries exist
+- Multiple people working on it
+
+### How You Would Split This
+
+```
+camera_dashboard/
+├── __init__.py
+├── main.py              # Entry point only
+├── config.py            # Configuration loading
+├── capture.py           # CaptureWorker class
+├── widgets/
+│   ├── __init__.py
+│   ├── camera.py        # CameraWidget
+│   ├── settings.py      # SettingsTile
+│   └── grid.py          # CameraGrid
+└── utils/
+    ├── __init__.py
+    ├── logging.py       # Logging setup
+    └── system.py        # CPU/temp monitoring
+```
+
+### Import Structure
+
+```python
+# camera_dashboard/main.py
+from camera_dashboard.config import load_config
+from camera_dashboard.capture import CaptureWorker
+from camera_dashboard.widgets.grid import CameraGrid
+
+def main():
+    load_config()
+    app = QApplication(sys.argv)
+    window = CameraGrid()
+    ...
+```
+
+---
+
+## 18. Security Considerations
+
+### Never Run as Root
+
+```bash
+# BAD: Running as root
+sudo python3 main.py  # Has access to EVERYTHING
+
+# GOOD: Running as normal user
+python3 main.py       # Limited permissions
+```
+
+**Why our install.sh checks:**
+```bash
+if [[ "$EUID" -eq 0 ]]; then
+    echo "Do NOT run this script as root"
+    exit 1
+fi
+```
+
+### File Permissions
+
+```bash
+# Config files should be readable by owner only if they contain secrets
+chmod 600 config.ini  # Owner read/write only
+
+# Scripts need execute permission
+chmod +x install.sh
+```
+
+### Input Validation
+
+```python
+# BAD: Trust user input
+device_id = int(request.args.get('camera'))  # Could crash or be exploited
+
+# GOOD: Validate input
+device_id = request.args.get('camera')
+if not device_id or not device_id.isdigit():
+    return "Invalid camera ID", 400
+device_id = int(device_id)
+if device_id < 0 or device_id > 10:
+    return "Camera ID out of range", 400
+```
+
+### Secrets Management
+
+```python
+# NEVER do this
+API_KEY = "sk-12345abcde"  # Committed to git!
+
+# Do this instead
+import os
+API_KEY = os.environ.get("API_KEY")
+if not API_KEY:
+    raise ValueError("API_KEY environment variable required")
+```
+
+---
+
+## 19. Performance Profiling
+
+### Finding Bottlenecks
+
+```python
+# Simple timing
+import time
+
+start = time.perf_counter()
+process_frame(frame)
+elapsed = time.perf_counter() - start
+print(f"Frame processing took {elapsed*1000:.2f}ms")
+```
+
+### Using cProfile
+
+```bash
+# Profile the entire application
+python3 -m cProfile -s cumtime main.py 2>&1 | head -50
+
+# Output shows time spent in each function
+   ncalls  tottime  cumtime  filename:lineno(function)
+     1000    2.500    2.500  main.py:300(_render_frame)
+      500    1.200    1.200  main.py:250(on_frame)
+```
+
+### Line-by-Line Profiling
+
+```bash
+pip install line_profiler
+
+# Add @profile decorator to function
+@profile
+def _render_latest_frame(self):
+    ...
+
+# Run with profiler
+kernprof -l -v main.py
+```
+
+### Memory Profiling
+
+```bash
+pip install memory_profiler
+
+@profile
+def process_frames():
+    ...
+
+python3 -m memory_profiler main.py
+```
+
+---
+
+## 20. The Python GIL (Global Interpreter Lock)
+
+### What Is the GIL?
+
+Python has a lock that only allows one thread to execute Python code at a time.
+
+```
+Thread 1: [====]      [====]      [====]
+Thread 2:       [====]      [====]
+                 ↑
+                 Only one runs at a time!
+```
+
+### Why Threading Still Works for Us
+
+The GIL is released during I/O operations:
+
+```python
+# This DOES benefit from threading
+ret, frame = cap.read()  # GIL released while waiting for camera
+
+# This does NOT benefit from threading
+result = heavy_computation(data)  # GIL held the entire time
+```
+
+**Our cameras are I/O-bound** → threading works perfectly.
+
+### When to Use Multiprocessing Instead
+
+```python
+# CPU-bound work: use multiprocessing
+from multiprocessing import Pool
+
+def process_image(frame):
+    # Heavy computation
+    return cv2.Canny(frame, 100, 200)
+
+with Pool(4) as p:
+    results = p.map(process_image, frames)
+```
+
+---
+
+## 21. Common Pitfalls
+
+### Race Conditions
+
+```python
+# DANGER: Two threads modifying same variable
+class BadCounter:
+    def __init__(self):
+        self.count = 0
+    
+    def increment(self):
+        # Thread 1: reads count (0)
+        # Thread 2: reads count (0)
+        # Thread 1: writes count (1)
+        # Thread 2: writes count (1)  # Should be 2!
+        self.count += 1
+
+# SAFE: Use a lock
+from threading import Lock
+
+class GoodCounter:
+    def __init__(self):
+        self.count = 0
+        self.lock = Lock()
+    
+    def increment(self):
+        with self.lock:
+            self.count += 1
+```
+
+**Our code avoids this by:**
+- Using Qt signals (thread-safe)
+- Only modifying UI from main thread
+- Using atomic operations where possible
+
+### Deadlocks
+
+```python
+# DEADLOCK: Two locks acquired in different order
+lock_a = Lock()
+lock_b = Lock()
+
+# Thread 1
+with lock_a:
+    with lock_b:  # Waits for Thread 2 to release lock_b
+        ...
+
+# Thread 2
+with lock_b:
+    with lock_a:  # Waits for Thread 1 to release lock_a
+        ...
+
+# Both threads wait forever!
+```
+
+**Prevention**: Always acquire locks in the same order.
+
+### Circular Imports
+
+```python
+# module_a.py
+from module_b import func_b
+def func_a(): ...
+
+# module_b.py
+from module_a import func_a  # CIRCULAR IMPORT ERROR!
+def func_b(): ...
+```
+
+**Solutions:**
+1. Restructure code to avoid circular dependency
+2. Import inside function (lazy import)
+3. Use a third module that both import
+
+---
+
+## 22. Real-World Development Workflow
+
+### How Professionals Actually Work
+
+```
+1. Get a task (bug report, feature request)
+        ↓
+2. Understand the problem (reproduce bug, clarify requirements)
+        ↓
+3. Create a branch
+   git checkout -b fix/camera-reconnection
+        ↓
+4. Write failing test (TDD) or reproduce the bug
+        ↓
+5. Write code to fix/implement
+        ↓
+6. Test locally
+        ↓
+7. Commit with good message
+        ↓
+8. Push and create pull request
+        ↓
+9. Code review (others review your code)
+        ↓
+10. Address feedback, update PR
+        ↓
+11. Merge to main
+        ↓
+12. Deploy
+```
+
+### Code Review Checklist
+
+When reviewing code (yours or others'):
+
+- [ ] Does it work? (Run it!)
+- [ ] Is it readable?
+- [ ] Are edge cases handled?
+- [ ] Is there error handling?
+- [ ] Are there security issues?
+- [ ] Is it tested?
+- [ ] Does it follow project conventions?
+
+### Debugging Workflow
+
+```
+1. Reproduce the problem
+   "It crashes when I unplug camera 2"
+
+2. Gather information
+   - Check logs
+   - Add more logging
+   - Use debugger
+
+3. Form hypothesis
+   "I think the worker thread doesn't detect the disconnect"
+
+4. Test hypothesis
+   - Add print/log statements
+   - Use breakpoints
+
+5. Fix and verify
+   - Make minimal change
+   - Confirm fix works
+   - Check for regressions
+
+6. Add test to prevent recurrence
+```
+
+### Using pdb (Python Debugger)
+
+```python
+# Add breakpoint in code
+import pdb; pdb.set_trace()
+
+# Or in Python 3.7+
+breakpoint()
+
+# Commands in pdb:
+# n - next line
+# s - step into function
+# c - continue
+# p variable - print variable
+# l - show code around current line
+# q - quit
+```
+
+---
+
+## 23. API Design Principles
+
+### Why Function Signatures Matter
+
+```python
+# BAD: What do these parameters mean?
+def process(x, y, z, flag1, flag2):
+    ...
+
+# GOOD: Clear names, defaults, type hints
+def process_frame(
+    frame: np.ndarray,
+    target_size: tuple[int, int] = (640, 480),
+    apply_night_mode: bool = False,
+    quality: int = 85
+) -> np.ndarray:
+    ...
+```
+
+### The Single Responsibility Principle
+
+```python
+# BAD: Function does too many things
+def handle_camera(device_id):
+    open_camera()
+    configure_camera()
+    capture_frame()
+    process_frame()
+    display_frame()
+    save_to_disk()
+    send_to_network()
+    close_camera()
+
+# GOOD: Each function does one thing
+def open_camera(device_id) -> cv2.VideoCapture: ...
+def capture_frame(cap) -> np.ndarray: ...
+def process_frame(frame) -> np.ndarray: ...
+def display_frame(frame) -> None: ...
+```
+
+### Fail Fast, Fail Loud
+
+```python
+# BAD: Silent failure
+def get_camera(device_id):
+    cap = cv2.VideoCapture(device_id)
+    return cap  # Might be invalid, caller doesn't know
+
+# GOOD: Explicit failure
+def get_camera(device_id) -> cv2.VideoCapture:
+    cap = cv2.VideoCapture(device_id)
+    if not cap.isOpened():
+        raise CameraError(f"Failed to open camera {device_id}")
+    return cap
+```
+
+### Defensive Programming
+
+```python
+def set_fps(self, fps: int) -> None:
+    """Set capture FPS.
+    
+    Args:
+        fps: Frames per second (1-60)
+    
+    Raises:
+        ValueError: If fps is out of range
+    """
+    if not isinstance(fps, int):
+        raise TypeError(f"fps must be int, got {type(fps)}")
+    if fps < 1 or fps > 60:
+        raise ValueError(f"fps must be 1-60, got {fps}")
+    
+    self._fps = fps
+```
 
 ---
 
