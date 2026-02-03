@@ -67,6 +67,10 @@ def dprint(*args, **kwargs):
 BLIND_SPOT_MODE = True
 PICAMERA2_ENABLED = True
 FULLSCREEN_SMOOTH = False
+NIGHT_MODE_DEFAULT = False
+NIGHT_MODE_GAMMA = 1.6
+NIGHT_MODE_ALPHA = 1.15
+NIGHT_MODE_BETA = 10
 
 log_level = logging.WARNING if BLIND_SPOT_MODE else logging.INFO
 logging.basicConfig(level=log_level,
@@ -565,6 +569,8 @@ class CameraWidget(QtWidgets.QWidget):
         settings_mode=False,
         on_restart=None,
         downsample_max_dim=None,
+        on_toggle_night_mode=None,
+        night_mode_enabled=False,
     ):
         """Initialize tile UI, worker thread, and timers."""
         super().__init__(parent)
@@ -597,6 +603,8 @@ class CameraWidget(QtWidgets.QWidget):
         self.placeholder_text = placeholder_text
         self.settings_mode = settings_mode
         self.downsample_max_dim = downsample_max_dim
+        self.night_mode_enabled = bool(night_mode_enabled)
+        self._night_mode_lut = self._build_night_mode_lut()
 
         self.normal_style = "border: 2px solid #555; background: black;"
         self.swap_ready_style = "border: 4px solid #FFFF00; background: black;"
@@ -620,7 +628,12 @@ class CameraWidget(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         if self.settings_mode:
-            self._setup_settings_mode(layout, on_restart)
+            self._setup_settings_mode(
+                layout,
+                on_restart,
+                on_toggle_night_mode,
+                self.night_mode_enabled,
+            )
         else:
             layout.addWidget(self.video_label)
 
@@ -675,7 +688,13 @@ class CameraWidget(QtWidgets.QWidget):
 
         logging.debug("Widget %s ready", self.widget_id)
 
-    def _setup_settings_mode(self, layout, on_restart):
+    def _setup_settings_mode(
+        self,
+        layout,
+        on_restart,
+        on_toggle_night_mode,
+        night_mode_enabled,
+    ):
         """Configure widget as settings tile."""
         self.video_label.setText(self.placeholder_text or "SETTINGS")
         self.video_label.setStyleSheet("color: #ffffff; font-size: 20px;")
@@ -687,8 +706,29 @@ class CameraWidget(QtWidgets.QWidget):
         if on_restart:
             restart_button.clicked.connect(on_restart)
 
+        night_mode_button = QtWidgets.QPushButton("Night Mode: Off")
+        night_mode_button.setCheckable(True)
+        night_mode_button.setChecked(bool(night_mode_enabled))
+        night_mode_button.setStyleSheet(
+            "QPushButton { padding: 10px 16px; font-size: 18px; }"
+            "QPushButton:checked { background: #2f6f3b; color: #ffffff; }"
+        )
+
+        def on_night_mode_toggled(checked):
+            night_mode_button.setText(
+                "Night Mode: On" if checked else "Night Mode: Off"
+            )
+            if on_toggle_night_mode:
+                on_toggle_night_mode(bool(checked))
+
+        night_mode_button.toggled.connect(on_night_mode_toggled)
+        on_night_mode_toggled(night_mode_button.isChecked())
+
         layout.addStretch(1)
         layout.addWidget(self.video_label)
+        layout.addSpacing(12)
+        layout.addWidget(
+            night_mode_button, alignment=Qt.AlignmentFlag.AlignCenter)
         layout.addSpacing(12)
         layout.addWidget(
             restart_button, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -979,6 +1019,9 @@ class CameraWidget(QtWidgets.QWidget):
                     self._last_rendered_frame = None
                 return
 
+            if self.night_mode_enabled:
+                frame_bgr = self._apply_night_mode(frame_bgr)
+
             # Skip if frame hasn't changed
             current_frame_id = self._frame_id
             if current_frame_id == self._last_rendered_frame:
@@ -1079,6 +1122,34 @@ class CameraWidget(QtWidgets.QWidget):
                 self.worker.set_target_fps(fps)
         except Exception:
             logging.exception("set_dynamic_fps")
+
+    def set_night_mode(self, enabled):
+        """Toggle night mode image processing."""
+        self.night_mode_enabled = bool(enabled)
+        self._last_rendered_frame = None
+
+    def _build_night_mode_lut(self):
+        """Precompute gamma correction LUT for night mode."""
+        gamma = float(NIGHT_MODE_GAMMA)
+        if gamma <= 0:
+            return None
+        inv_gamma = 1.0 / gamma
+        return np.array([
+            min(255, int(((i / 255.0) ** inv_gamma) * 255.0))
+            for i in range(256)
+        ], dtype=np.uint8)
+
+    def _apply_night_mode(self, frame):
+        """Apply a lightweight night enhancement to a frame."""
+        try:
+            boosted = cv2.convertScaleAbs(
+                frame, alpha=NIGHT_MODE_ALPHA, beta=NIGHT_MODE_BETA)
+            if self._night_mode_lut is not None:
+                boosted = cv2.LUT(boosted, self._night_mode_lut)
+            return boosted
+        except Exception:
+            logging.exception("night mode")
+            return frame
 
     def cleanup(self):
         """Stop the capture worker thread cleanly."""
@@ -1397,6 +1468,7 @@ def main():
     placeholder_slots = []
 
     CAMERA_SLOT_COUNT = 3
+    night_mode_enabled = NIGHT_MODE_DEFAULT
 
     def on_sigint(sig, frame):
         safe_cleanup(camera_widgets)
@@ -1449,6 +1521,13 @@ def main():
         python = sys.executable
         os.execv(python, [python] + sys.argv)
 
+    def toggle_night_mode(enabled):
+        """Apply night mode to all camera tiles."""
+        nonlocal night_mode_enabled
+        night_mode_enabled = bool(enabled)
+        for w in all_widgets:
+            w.set_night_mode(night_mode_enabled)
+
     # Settings tile
     settings_tile = CameraWidget(
         width=1,
@@ -1463,6 +1542,8 @@ def main():
         placeholder_text="SETTINGS",
         settings_mode=True,
         on_restart=restart_app,
+        on_toggle_night_mode=toggle_night_mode,
+        night_mode_enabled=night_mode_enabled,
     )
     all_widgets.append(settings_tile)
 
@@ -1495,6 +1576,7 @@ def main():
                 ui_fps=ui_fps,
                 enable_capture=True,
                 downsample_max_dim=downsample_max_dim,
+                night_mode_enabled=night_mode_enabled,
             )
             camera_widgets.append(cw)
         else:
@@ -1509,6 +1591,7 @@ def main():
                 ui_fps=5,
                 enable_capture=False,
                 placeholder_text="DISCONNECTED",
+                night_mode_enabled=night_mode_enabled,
             )
             placeholder_slots.append(cw)
         all_widgets.append(cw)
@@ -1626,6 +1709,7 @@ def main():
                 if ok is not None:
                     slot = placeholder_slots.pop(0)
                     slot.downsample_max_dim = downsample_max_dim
+                    slot.set_night_mode(night_mode_enabled)
                     slot.attach_camera(
                         ok, cap_fps, (cap_w, cap_h), ui_fps=ui_fps)
                     camera_widgets.append(slot)
