@@ -25,7 +25,7 @@ A multi-camera monitoring system optimized for Raspberry Pi, designed for blind-
 - **Night Mode**: Toggle enhanced visibility for low-light conditions
 - **Settings Tile**: Quick access to restart, night mode, and exit
 
-### Performance Optimized
+### Performance Optimization
 
 - **GStreamer Pipeline**: Hardware-accelerated MJPEG decoding (with V4L2 fallback)
 - **Dynamic FPS Adjustment**: Automatically reduces frame rate under CPU/thermal stress
