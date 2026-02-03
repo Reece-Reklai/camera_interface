@@ -1015,6 +1015,7 @@ class CameraWidget(QtWidgets.QWidget):
 
             self._last_rendered_id = self._frame_id
             self._last_rendered_size = target_size
+            self._last_placeholder_text = None
             if UI_FPS_LOGGING:
                 self.frame_count += 1
         except Exception:
@@ -1030,6 +1031,7 @@ class CameraWidget(QtWidgets.QWidget):
             self._last_frame_ts = time.time()
         else:
             self._latest_frame = None
+            self._last_rendered_id = -1
             self._render_placeholder("DISCONNECTED")
 
     def reset_style(self):
