@@ -359,17 +359,40 @@ DEBUG_PRINTS=true python3 main.py
 
 ```
 camera_dashboard/
-├── main.py                 # Main application code
-├── config.ini              # Configuration file
-├── install.sh              # Automated installer
-├── camera-dashboard.service # Systemd service (auto-generated)
-├── requirements.txt        # Python dependencies
-├── README.md               # This file
-├── LICENSE.MIT             # MIT License
-├── logs/                   # Log files (created at runtime)
+├── main.py                   # Application entry point
+├── core/                     # Core functionality
+│   ├── __init__.py           # Exports: config, camera, performance
+│   ├── config.py             # Configuration loading, logging setup, constants
+│   ├── camera.py             # CaptureWorker thread, camera discovery
+│   └── performance.py        # CPU load/temp monitoring, stress detection
+├── ui/                       # User interface
+│   ├── __init__.py           # Exports: CameraWidget, get_smart_grid
+│   ├── widgets.py            # CameraWidget, FullscreenOverlay
+│   └── layout.py             # Grid layout helpers
+├── utils/                    # Utilities
+│   ├── __init__.py           # Exports: system helpers
+│   └── helpers.py            # Process management, systemd integration
+├── config.ini                # Configuration file
+├── install.sh                # Automated installer
+├── camera-dashboard.service  # Systemd service (auto-generated)
+├── requirements.txt          # Python dependencies
+├── README.md                 # This file
+├── LICENSE.MIT               # MIT License
+├── logs/                     # Log files (created at runtime)
 │   └── camera_dashboard.log
-└── .venv/                  # Python virtual environment
+└── .venv/                    # Python virtual environment
 ```
+
+### Module Overview
+
+| Module | Description |
+| ------ | ----------- |
+| `core.config` | Configuration loading from INI, environment variables, logging setup |
+| `core.camera` | `CaptureWorker` QThread for video capture, camera discovery functions |
+| `core.performance` | CPU load and temperature monitoring, stress detection |
+| `ui.widgets` | `CameraWidget` for camera tiles, `FullscreenOverlay` for fullscreen view |
+| `ui.layout` | Grid layout calculation based on camera count |
+| `utils.helpers` | System utilities, process management, systemd notifications |
 
 ---
 

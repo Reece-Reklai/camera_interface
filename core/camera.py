@@ -1,0 +1,465 @@
+"""
+Camera capture and discovery for Camera Dashboard.
+
+Contains CaptureWorker for threaded video capture and
+functions for discovering available cameras.
+"""
+
+from __future__ import annotations
+
+import glob as glob_module
+import logging
+import platform
+import threading
+import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Optional, Union
+
+import cv2
+import numpy as np
+from numpy.typing import NDArray
+from PyQt6.QtCore import QObject, QThread, pyqtSignal
+
+from core import config
+from utils import kill_device_holders
+
+
+class CaptureWorker(QThread):
+    """Background thread for capturing frames from a camera."""
+    
+    # Signal emitted when a new frame is ready for the UI thread.
+    frame_ready = pyqtSignal(object)
+    # Signal emitted when camera connection status changes.
+    status_changed = pyqtSignal(bool)
+
+    def __init__(
+        self,
+        stream_link: Union[int, str],
+        parent: Optional[QObject] = None,
+        maxlen: int = 1,
+        target_fps: Optional[float] = None,
+        capture_width: Optional[int] = None,
+        capture_height: Optional[int] = None,
+    ) -> None:
+        """Initialize camera capture settings and state."""
+        super().__init__(parent)
+        self.stream_link = stream_link
+        self._running = True
+        self._reconnect_backoff = 1.0
+        self._cap: Optional[cv2.VideoCapture] = None
+        self._last_emit = 0.0
+        self._target_fps = target_fps
+        self._emit_interval = 1.0 / 30.0
+        self.capture_width = capture_width
+        self.capture_height = capture_height
+        self._online = False
+        self._open_fail_count = 0
+        # Track if using GStreamer backend for proper cleanup
+        self._using_gstreamer = False
+        # Buffer holds most recent frames, used to decouple capture from UI.
+        self.buffer: deque[NDArray[np.uint8]] = deque(maxlen=maxlen)
+        # Lock protects changes to FPS/emit interval from other threads.
+        self._fps_lock = threading.Lock()
+
+    def run(self) -> None:
+        """Capture loop: open camera, grab frames, emit, reconnect on failure."""
+        logging.info("Camera %s thread started", self.stream_link)
+        while self._running:
+            try:
+                # Ensure capture is open; reconnect if it fails.
+                if self._cap is None or not self._cap.isOpened():
+                    self._open_capture()
+                    if not (self._cap and self._cap.isOpened()):
+                        self._open_fail_count += 1
+                        if self._open_fail_count % 10 == 0:
+                            logging.warning(
+                                "Camera %s open failed (%d attempts)",
+                                self.stream_link,
+                                self._open_fail_count,
+                            )
+                        if self._online:
+                            self._online = False
+                            self.status_changed.emit(False)
+                        time.sleep(self._reconnect_backoff)
+                        self._reconnect_backoff = min(
+                            self._reconnect_backoff * 1.5, 10.0
+                        )
+                        continue
+                    self._reconnect_backoff = 1.0
+                    self._open_fail_count = 0
+                    if not self._online:
+                        self._online = True
+                        self.status_changed.emit(True)
+
+                # Grab & retrieve keeps latency low vs read().
+                grabbed = self._cap.grab()
+                if not grabbed:
+                    logging.debug(
+                        "Camera %s: grab() failed, closing capture",
+                        self.stream_link,
+                    )
+                    self._close_capture()
+                    if self._online:
+                        self._online = False
+                        self.status_changed.emit(False)
+                    continue
+
+                ret, frame = self._cap.retrieve()
+                if not ret or frame is None:
+                    logging.debug(
+                        "Camera %s: retrieve() failed, closing capture",
+                        self.stream_link,
+                    )
+                    self._close_capture()
+                    if self._online:
+                        self._online = False
+                        self.status_changed.emit(False)
+                    continue
+
+                now = time.time()
+                with self._fps_lock:
+                    emit_interval = self._emit_interval
+                # Throttle emits to target FPS to avoid UI overload.
+                if now - self._last_emit >= emit_interval:
+                    self.buffer.append(frame)
+                    self.frame_ready.emit(frame)
+                    self._last_emit = now
+
+                self.msleep(1)
+            except Exception:
+                logging.exception("Exception in CaptureWorker %s", self.stream_link)
+                time.sleep(0.2)
+
+        self._close_capture()
+        logging.info("Camera %s thread stopped", self.stream_link)
+
+    def _open_capture(self) -> None:
+        """Open the camera and apply preferred capture settings."""
+        try:
+            cap = None
+            backend_name = "V4L2"
+
+            # Try GStreamer first if enabled (more efficient MJPEG pipeline)
+            if (
+                config.USE_GSTREAMER
+                and platform.system() == "Linux"
+                and isinstance(self.stream_link, int)
+            ):
+                try:
+                    w = int(self.capture_width) if self.capture_width else 640
+                    h = int(self.capture_height) if self.capture_height else 480
+                    # Choose MJPEG decoder: avdec_mjpeg (FFmpeg/libav, ARM NEON optimized)
+                    # or jpegdec (libjpeg, more compatible)
+                    decoder = "avdec_mjpeg" if config.USE_AVDEC else "jpegdec"
+                    # GStreamer pipeline: v4l2src -> MJPEG decode -> BGR output
+                    pipeline = (
+                        f"v4l2src device=/dev/video{self.stream_link} ! "
+                        f"image/jpeg,width={w},height={h} ! "
+                        f"{decoder} ! videoconvert ! appsink drop=1"
+                    )
+                    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+                    if cap and cap.isOpened():
+                        # Test if we can actually grab a frame
+                        test_ret = cap.grab()
+                        if test_ret:
+                            backend_name = "GStreamer"
+                            logging.info(
+                                "GStreamer pipeline opened for camera %s (decoder=%s)",
+                                self.stream_link,
+                                decoder,
+                            )
+                        else:
+                            cap.release()
+                            cap = None
+                    else:
+                        if cap:
+                            cap.release()
+                        cap = None
+                except Exception as e:
+                    logging.warning(
+                        "GStreamer failed for camera %s: %s", self.stream_link, e
+                    )
+                    cap = None
+
+            # Fallback to V4L2 if GStreamer failed or not enabled
+            if cap is None:
+                if config.USE_GSTREAMER:
+                    logging.info(
+                        "Camera %s: GStreamer unavailable, falling back to V4L2",
+                        self.stream_link,
+                    )
+                backend = cv2.CAP_ANY
+                if platform.system() == "Linux":
+                    backend = cv2.CAP_V4L2
+                cap = cv2.VideoCapture(self.stream_link, backend)
+                backend_name = "V4L2"
+
+            if not cap or not cap.isOpened():
+                logging.warning(
+                    "Camera %s: Failed to open capture (no backend worked)",
+                    self.stream_link,
+                )
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                return
+
+            # Only apply these settings for V4L2 backend (not needed for GStreamer)
+            if backend_name == "V4L2":
+                # Request MJPEG if available to reduce decode overhead.
+                try:
+                    cap.set(
+                        cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc("M", "J", "P", "G")
+                    )
+                except Exception:
+                    pass
+
+                # Apply capture resolution when requested.
+                if self.capture_width:
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.capture_width))
+                if self.capture_height:
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.capture_height))
+
+                # Reduce internal buffering to keep frames current.
+                try:
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                except Exception:
+                    pass
+
+                # Try to prevent blocking reads on flaky cameras.
+                try:
+                    cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 2000)
+                    cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 2000)
+                except Exception:
+                    pass
+
+                # Request FPS; 0 may let camera choose.
+                try:
+                    if self._target_fps and self._target_fps > 0:
+                        cap.set(cv2.CAP_PROP_FPS, float(self._target_fps))
+                    else:
+                        cap.set(cv2.CAP_PROP_FPS, 0)
+                except Exception:
+                    pass
+
+            if cap.isOpened():
+                self._cap = cap
+                self._using_gstreamer = backend_name == "GStreamer"
+                self._configure_fps_from_camera()
+                try:
+                    raw = int(self._cap.get(cv2.CAP_PROP_FOURCC))
+                    fourcc = "".join([chr((raw >> (8 * i)) & 0xFF) for i in range(4)])
+                    if fourcc.strip() and fourcc != "MJPG":
+                        logging.info(
+                            "Camera %s using FOURCC=%s", self.stream_link, fourcc
+                        )
+                except Exception:
+                    pass
+                try:
+                    actual_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    actual_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    actual_fps = float(self._cap.get(cv2.CAP_PROP_FPS))
+                    logging.info(
+                        "Camera %s format %dx%d @ %.1f FPS (%s)",
+                        self.stream_link,
+                        actual_w,
+                        actual_h,
+                        actual_fps,
+                        backend_name,
+                    )
+                except Exception:
+                    pass
+                logging.info(
+                    "Opened capture %s (requested %sx%s) -> emit fps=%.1f",
+                    self.stream_link,
+                    self.capture_width,
+                    self.capture_height,
+                    1.0 / self._emit_interval if self._emit_interval > 0 else 0.0,
+                )
+                return
+            else:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+        except Exception:
+            logging.exception("Failed to open capture %s", self.stream_link)
+
+    def _configure_fps_from_camera(self) -> None:
+        """Pick a usable FPS value and update emit interval."""
+        if self._target_fps and self._target_fps > 0:
+            fps = float(self._target_fps)
+        else:
+            fps = float(self._cap.get(cv2.CAP_PROP_FPS)) if self._cap else 0.0
+
+        if fps <= 1.0 or fps > 240.0:
+            fps = 30.0
+
+        with self._fps_lock:
+            self._emit_interval = 1.0 / max(1.0, fps)
+
+    def set_target_fps(self, fps: Optional[float]) -> None:
+        """Update target FPS and camera setting at runtime."""
+        if fps is None:
+            return
+        try:
+            fps = float(fps)
+            if fps <= 0:
+                return
+            with self._fps_lock:
+                self._target_fps = fps
+                self._emit_interval = 1.0 / max(1.0, fps)
+            try:
+                if self._cap:
+                    self._cap.set(cv2.CAP_PROP_FPS, fps)
+            except Exception:
+                pass
+        except Exception:
+            logging.exception("set_target_fps")
+
+    def _close_capture(self) -> None:
+        """Release camera handle if open.
+        
+        For GStreamer captures, we add a small delay to allow the pipeline
+        to properly transition through states before releasing, which helps
+        avoid "Pipeline is live and does not need PREROLL" warnings and
+        potential segfaults during cleanup.
+        """
+        try:
+            if self._cap:
+                # For GStreamer backend, give pipeline time to drain
+                if self._using_gstreamer:
+                    # Small delay helps GStreamer complete pending operations
+                    time.sleep(0.05)
+                self._cap.release()
+                self._cap = None
+                self._using_gstreamer = False
+        except Exception:
+            logging.debug("Exception during capture release for %s", self.stream_link)
+            self._cap = None
+            self._using_gstreamer = False
+
+    def stop(self) -> None:
+        """Stop capture loop and wait briefly for thread exit.
+        
+        The wait allows the run() loop to exit cleanly, which includes
+        calling _close_capture() from within the thread context.
+        """
+        self._running = False
+        # Wait for thread to finish (includes cleanup in run())
+        if not self.wait(2000):
+            logging.warning("Camera %s thread did not stop in time", self.stream_link)
+        # Ensure capture is closed even if thread didn't exit cleanly
+        self._close_capture()
+
+
+# ============================================================
+# CAMERA DISCOVERY
+# ============================================================
+
+
+def test_single_camera(
+    cam_index: int,
+    retries: int = 3,
+    retry_delay: float = 0.2,
+    allow_kill: bool = True,
+    post_kill_retries: int = 2,
+    post_kill_delay: float = 0.25,
+) -> Optional[int]:
+    """Try to open and grab a frame from one camera index."""
+    device_path = f"/dev/video{cam_index}"
+
+    def try_open():
+        cap = cv2.VideoCapture(cam_index, cv2.CAP_V4L2)
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            if not cap.isOpened():
+                return False
+            if not cap.grab():
+                return False
+            return True
+        finally:
+            try:
+                cap.release()
+            except Exception:
+                pass
+
+    for _ in range(retries):
+        if try_open():
+            return cam_index
+        time.sleep(retry_delay)
+
+    if allow_kill and config.KILL_DEVICE_HOLDERS:
+        killed = kill_device_holders(device_path)
+        if killed:
+            for _ in range(post_kill_retries):
+                if try_open():
+                    return cam_index
+                time.sleep(post_kill_delay)
+
+    return None
+
+
+def get_video_indexes() -> list[int]:
+    """List integer indices for /dev/video* devices."""
+    video_devices = glob_module.glob("/dev/video*")
+    indexes = []
+    for device in sorted(video_devices):
+        try:
+            index = int(device.split("video")[-1])
+            indexes.append(index)
+        except Exception:
+            pass
+    return indexes
+
+
+def find_working_cameras() -> list[int]:
+    """Return a list of camera indices that can capture frames."""
+    indexes = get_video_indexes()
+    if not indexes:
+        logging.info("No /dev/video* devices found!")
+        return []
+
+    max_workers = min(4, len(indexes))
+    logging.info(
+        "Testing %d cameras concurrently (workers=%d)...", len(indexes), max_workers
+    )
+    working = []
+    lock = threading.Lock()
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(test_single_camera, idx) for idx in indexes]
+        for future in as_completed(futures):
+            result = future.result()
+            if result is not None:
+                with lock:
+                    working.append(result)
+                    logging.info("Camera %d OK", result)
+
+    # Second pass to confirm cameras without killing holders
+    if working:
+        logging.info("Round 2 - Double-check (no pre-kill)...")
+        final_working = []
+        with ThreadPoolExecutor(max_workers=min(4, len(working))) as executor:
+            futures = [
+                executor.submit(
+                    test_single_camera,
+                    idx,
+                    retries=2,
+                    retry_delay=0.15,
+                    allow_kill=False,
+                )
+                for idx in working
+            ]
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    final_working.append(result)
+                    logging.info("Confirmed camera %d", result)
+        working = final_working
+
+    cv2.destroyAllWindows()
+    logging.info("FINAL Working cameras: %s", working)
+    return working
