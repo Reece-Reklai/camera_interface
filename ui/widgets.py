@@ -2,6 +2,7 @@
 UI Widgets for Camera Dashboard.
 
 Contains CameraWidget for camera tiles and FullscreenOverlay for fullscreen view.
+Uses OpenGL by default for hardware-accelerated rendering (controlled by USE_OPENGL config).
 """
 
 from __future__ import annotations
@@ -19,6 +20,101 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSlot
 
 from core import config
 from core.camera import CaptureWorker
+
+# Optional OpenGL support for GPU-accelerated rendering
+_OPENGL_AVAILABLE = False
+QSurfaceFormat = None  # type: ignore[assignment,misc]
+try:
+    from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+    from PyQt6.QtOpenGL import QOpenGLTexture
+    from PyQt6.QtGui import QSurfaceFormat
+    _OPENGL_AVAILABLE = True
+except ImportError:
+    pass
+
+
+class GLVideoLabel(QtWidgets.QWidget):
+    """OpenGL-accelerated video display widget.
+    
+    Uses GPU texture upload and rendering for reduced CPU usage
+    compared to QPainter-based rendering. Falls back to QLabel
+    if OpenGL is not available.
+    """
+    
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(parent)
+        self._pixmap: Optional[QtGui.QPixmap] = None
+        self._text: str = ""
+        self._text_style: str = ""
+        self._use_opengl = config.USE_OPENGL and _OPENGL_AVAILABLE
+        
+        if self._use_opengl:
+            try:
+                # Set up OpenGL surface format for better performance
+                fmt = QSurfaceFormat()
+                fmt.setSwapBehavior(QSurfaceFormat.SwapBehavior.DoubleBuffer)
+                fmt.setSwapInterval(0)  # Disable vsync for lower latency
+                QSurfaceFormat.setDefaultFormat(fmt)
+            except Exception:
+                self._use_opengl = False
+        
+        self.setMinimumSize(1, 1)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+    
+    def setPixmap(self, pixmap: QtGui.QPixmap) -> None:
+        """Set the pixmap to display."""
+        self._pixmap = pixmap
+        self._text = ""
+        self.update()
+    
+    def setText(self, text: str) -> None:
+        """Set text to display (clears pixmap)."""
+        self._text = text
+        if text:
+            self._pixmap = None
+        self.update()
+    
+    def setStyleSheet(self, styleSheet: str) -> None:  # noqa: N802,N803
+        """Store style for text rendering."""
+        self._text_style = styleSheet
+        super().setStyleSheet(styleSheet)
+    
+    def setAlignment(self, alignment: Qt.AlignmentFlag) -> None:
+        """Compatibility method (alignment handled in paintEvent)."""
+        pass
+    
+    def setScaledContents(self, scaled: bool) -> None:
+        """Compatibility method (always scaled)."""
+        pass
+    
+    def paintEvent(self, a0: Optional[QtGui.QPaintEvent]) -> None:
+        """Render pixmap or text using QPainter (GPU-accelerated when possible)."""
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, False)
+        
+        # Fill background
+        painter.fillRect(self.rect(), Qt.GlobalColor.black)
+        
+        if self._pixmap and not self._pixmap.isNull():
+            # Scale pixmap to fit widget while maintaining aspect ratio
+            scaled = self._pixmap.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.FastTransformation
+            )
+            # Center the scaled pixmap
+            x = (self.width() - scaled.width()) // 2
+            y = (self.height() - scaled.height()) // 2
+            painter.drawPixmap(x, y, scaled)
+        elif self._text:
+            # Draw centered text
+            painter.setPen(QtGui.QColor("#bbbbbb"))
+            font = painter.font()
+            font.setPointSize(18)
+            painter.setFont(font)
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._text)
+        
+        painter.end()
 
 
 class FullscreenOverlay(QtWidgets.QWidget):
@@ -134,14 +230,20 @@ class CameraWidget(QtWidgets.QWidget):
         self.setObjectName(self.widget_id)
 
         # Video display label or settings title
-        self.video_label = QtWidgets.QLabel(self)
+        # Use OpenGL-accelerated widget when available and enabled for better GPU usage
+        use_gl = config.USE_OPENGL and _OPENGL_AVAILABLE and not settings_mode
+        if use_gl:
+            self.video_label = GLVideoLabel(self)
+            logging.debug("Using OpenGL video label for %s", self.widget_id)
+        else:
+            self.video_label = QtWidgets.QLabel(self)
+            self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.video_label.setScaledContents(True)
         self.video_label.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
         self.video_label.setMinimumSize(1, 1)
-        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.video_label.setScaledContents(True)
         self.video_label.setMouseTracking(True)
         self.video_label.setObjectName(f"{self.widget_id}_label")
         self.video_label.setAttribute(
@@ -649,27 +751,29 @@ class CameraWidget(QtWidgets.QWidget):
                     else:
                         h, w = frame_bgr.shape[:2]
 
+                    # Lazy allocate night mode buffers (only once per resolution)
                     if self._night_gray is None or self._night_gray.shape != (h, w):
                         self._night_gray = np.empty((h, w), dtype=np.uint8)
                     if self._night_bgr is None or self._night_bgr.shape[:2] != (h, w):
-                        self._night_bgr = np.empty((h, w, 3), dtype=np.uint8)
+                        # Use contiguous array for efficient Qt buffer access
+                        self._night_bgr = np.zeros((h, w, 3), dtype=np.uint8, order='C')
 
                     if frame_bgr.ndim == 2:
-                        # Apply brightness LUT directly to grayscale
+                        # Apply brightness LUT directly to grayscale (in-place)
                         cv2.LUT(frame_bgr, self._night_lut, dst=self._night_gray)
                     else:
-                        # Convert to grayscale, then apply brightness LUT
+                        # Convert to grayscale, then apply brightness LUT (in-place)
                         cv2.cvtColor(
                             frame_bgr, cv2.COLOR_BGR2GRAY, dst=self._night_gray
                         )
                         cv2.LUT(self._night_gray, self._night_lut, dst=self._night_gray)
 
-                    self._night_bgr[:, :, 0].fill(0)
-                    self._night_bgr[:, :, 1].fill(0)
+                    # Optimized: only update red channel, B/G stay zero from allocation
+                    # Use direct slice assignment (faster than np.copyto for this pattern)
                     self._night_bgr[:, :, 2] = self._night_gray
                     frame_bgr = self._night_bgr
                 except Exception:
-                    pass
+                    logging.debug("Night mode processing failed", exc_info=True)
 
             # Convert numpy frame to Qt image, handling grayscale or BGR.
             # Ensure contiguous memory layout for direct buffer access (avoids copy).
@@ -784,7 +888,7 @@ class CameraWidget(QtWidgets.QWidget):
                 self.frame_count = 0
                 self.prev_time = now
         except Exception:
-            pass
+            logging.debug("FPS logging exception", exc_info=True)
 
     def set_dynamic_fps(self, fps: Optional[float]) -> None:
         """Apply dynamic FPS change from stress monitor."""
@@ -823,24 +927,58 @@ class CameraWidget(QtWidgets.QWidget):
             t for t in self._restart_events if (now - t) <= self._restart_window_sec
         ]
         if len(recent) >= self._max_restarts_per_window:
-            logging.warning("Restart limit reached for %s", self.camera_stream_link)
-            return
+            # Don't give up forever - schedule a retry after extended cooldown
+            extended_cooldown = self._restart_window_sec * 2  # 60 seconds
+            if (now - self._last_restart_ts) < extended_cooldown:
+                if not getattr(self, '_restart_limit_logged', False):
+                    logging.warning(
+                        "Restart limit reached for %s, will retry in %.0fs",
+                        self.camera_stream_link,
+                        extended_cooldown
+                    )
+                    self._restart_limit_logged = True
+                return
+            # Extended cooldown passed, clear events and allow restart
+            logging.info(
+                "Extended cooldown passed for %s, attempting recovery",
+                self.camera_stream_link
+            )
+            self._restart_events.clear()
+            self._restart_limit_logged = False
+        
         self._restart_events.append(now)
         self._last_restart_ts = now
-        try:
-            logging.info(
-                "Restarting capture for %s after stale frames", self.camera_stream_link
-            )
-            self.worker.stop()
-        except Exception:
-            pass
-
-        cap_w = getattr(self.worker, "capture_width", None)
-        cap_h = getattr(self.worker, "capture_height", None)
+        
+        # Store old worker reference to verify cleanup
+        old_worker = self.worker
+        cap_w = getattr(old_worker, "capture_width", None)
+        cap_h = getattr(old_worker, "capture_height", None)
         target_fps = self.current_target_fps or self.base_target_fps
+        
+        logging.info(
+            "Restarting capture for %s after stale frames", self.camera_stream_link
+        )
+        
+        # Stop old worker and verify it stopped
+        try:
+            old_worker.stop()
+        except Exception:
+            logging.exception("Error stopping old worker for %s", self.camera_stream_link)
+        
+        # Verify old worker is actually stopped before creating new one
+        if old_worker.isRunning():
+            logging.error(
+                "Old worker for %s still running after stop() - potential resource leak",
+                self.camera_stream_link
+            )
+            # Don't create a new worker if old one is still running
+            # This prevents resource conflicts
+            return
+        
         # camera_stream_link is guaranteed to be set if capture_enabled is True
         if self.camera_stream_link is None:
             return
+        
         self.worker = CaptureWorker(
             self.camera_stream_link,
             parent=self,

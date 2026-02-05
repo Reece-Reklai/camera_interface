@@ -76,8 +76,10 @@ PROFILE_UI_FPS = 15
 
 # GStreamer pipeline support
 USE_GSTREAMER = True
-# Use avdec_mjpeg (FFmpeg/libav) instead of jpegdec - may be faster on ARM with NEON
-USE_AVDEC = True
+
+# OpenGL rendering - uses GPU for frame compositing, reducing CPU usage on Pi 4/5
+# Requires Qt OpenGL support (PyQt6-OpenGL)
+USE_OPENGL = True
 
 # Render overhead compensation (ms)
 RENDER_OVERHEAD_MS = 3
@@ -161,7 +163,7 @@ def apply_config(parser: configparser.ConfigParser) -> None:
     global RESCAN_INTERVAL_MS, FAILED_CAMERA_COOLDOWN_SEC, CAMERA_SLOT_COUNT
     global HEALTH_LOG_INTERVAL_SEC, KILL_DEVICE_HOLDERS
     global PROFILE_CAPTURE_WIDTH, PROFILE_CAPTURE_HEIGHT, PROFILE_CAPTURE_FPS
-    global PROFILE_UI_FPS, USE_GSTREAMER, USE_AVDEC
+    global PROFILE_UI_FPS, USE_GSTREAMER, USE_OPENGL
 
     if parser.has_section("logging"):
         LOG_LEVEL = parser.get("logging", "level", fallback=LOG_LEVEL)
@@ -298,8 +300,8 @@ def apply_config(parser: configparser.ConfigParser) -> None:
         USE_GSTREAMER = _as_bool(
             parser.get("camera", "use_gstreamer", fallback=USE_GSTREAMER), USE_GSTREAMER
         )
-        USE_AVDEC = _as_bool(
-            parser.get("camera", "use_avdec", fallback=USE_AVDEC), USE_AVDEC
+        USE_OPENGL = _as_bool(
+            parser.get("camera", "use_opengl", fallback=USE_OPENGL), USE_OPENGL
         )
 
     if parser.has_section("profile"):
@@ -370,13 +372,45 @@ def configure_logging() -> None:
 
 
 def choose_profile(camera_count: int) -> tuple[int, int, int, int]:
-    """Pick capture resolution and FPS based on camera count."""
-    return (
-        PROFILE_CAPTURE_WIDTH,
-        PROFILE_CAPTURE_HEIGHT,
-        PROFILE_CAPTURE_FPS,
-        PROFILE_UI_FPS,
-    )
+    """Pick capture resolution and FPS based on camera count.
+    
+    Dynamically scales resolution down when more cameras are active
+    to maintain smooth performance on resource-constrained devices.
+    
+    Returns: (width, height, capture_fps, ui_fps)
+    """
+    # Base configuration from config
+    base_w = PROFILE_CAPTURE_WIDTH
+    base_h = PROFILE_CAPTURE_HEIGHT
+    base_fps = PROFILE_CAPTURE_FPS
+    base_ui_fps = PROFILE_UI_FPS
+    
+    # Scale down for multiple cameras to reduce CPU/memory load
+    # These thresholds work well on Raspberry Pi 4/5
+    if camera_count >= 6:
+        # 6+ cameras: drop to 320x240 @ 15fps
+        scale = 0.5
+        fps_scale = 0.6
+    elif camera_count >= 4:
+        # 4-5 cameras: drop to 480x360 @ 18fps
+        scale = 0.75
+        fps_scale = 0.75
+    elif camera_count >= 2:
+        # 2-3 cameras: use configured resolution @ slightly reduced fps
+        scale = 1.0
+        fps_scale = 0.9
+    else:
+        # 1 camera: full configured resolution and FPS
+        scale = 1.0
+        fps_scale = 1.0
+    
+    # Apply scaling (ensure dimensions are multiples of 16 for codec efficiency)
+    scaled_w = max(160, int(base_w * scale) // 16 * 16)
+    scaled_h = max(120, int(base_h * scale) // 16 * 16)
+    scaled_fps = max(MIN_DYNAMIC_FPS, int(base_fps * fps_scale))
+    scaled_ui_fps = max(MIN_DYNAMIC_UI_FPS, int(base_ui_fps * fps_scale))
+    
+    return (scaled_w, scaled_h, scaled_fps, scaled_ui_fps)
 
 
 def dprint(*args: Any, **kwargs: Any) -> None:

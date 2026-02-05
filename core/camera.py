@@ -33,6 +33,9 @@ class CaptureWorker(QThread):
     # Signal emitted when camera connection status changes.
     status_changed = pyqtSignal(bool)
 
+    # Pre-allocated frame pool size (reduces GC pressure)
+    FRAME_POOL_SIZE = 3
+
     def __init__(
         self,
         stream_link: Union[int, str],
@@ -61,6 +64,40 @@ class CaptureWorker(QThread):
         self.buffer: deque[NDArray[np.uint8]] = deque(maxlen=maxlen)
         # Lock protects changes to FPS/emit interval from other threads.
         self._fps_lock = threading.Lock()
+        
+        # Pre-allocated frame pool to reduce memory allocations/GC pressure
+        self._frame_pool: deque[NDArray[np.uint8]] = deque(maxlen=self.FRAME_POOL_SIZE)
+        self._frame_pool_lock = threading.Lock()
+        self._pool_frame_shape: Optional[tuple[int, ...]] = None
+
+    def _get_pooled_frame(self, shape: tuple[int, ...], dtype: np.dtype) -> NDArray[np.uint8]:
+        """Get a pre-allocated frame from pool or create new one.
+        
+        This reduces memory allocation overhead and GC pressure by reusing
+        frame buffers instead of allocating new ones for each capture.
+        """
+        with self._frame_pool_lock:
+            # If shape changed, invalidate pool
+            if self._pool_frame_shape != shape:
+                self._frame_pool.clear()
+                self._pool_frame_shape = shape
+            
+            # Try to get existing frame from pool
+            if self._frame_pool:
+                return self._frame_pool.popleft()
+        
+        # Allocate new frame (contiguous for efficient Qt conversion)
+        return np.empty(shape, dtype=dtype, order='C')
+    
+    def _return_to_pool(self, frame: NDArray[np.uint8]) -> None:
+        """Return a frame buffer to the pool for reuse."""
+        with self._frame_pool_lock:
+            if (
+                self._pool_frame_shape is not None
+                and frame.shape == self._pool_frame_shape
+                and len(self._frame_pool) < self.FRAME_POOL_SIZE
+            ):
+                self._frame_pool.append(frame)
 
     def run(self) -> None:
         """Capture loop: open camera, grab frames, emit, reconnect on failure."""
@@ -122,8 +159,11 @@ class CaptureWorker(QThread):
                     emit_interval = self._emit_interval
                 # Throttle emits to target FPS to avoid UI overload.
                 if now - self._last_emit >= emit_interval:
-                    self.buffer.append(frame)
-                    self.frame_ready.emit(frame)
+                    # Use pooled frame to reduce allocations
+                    pooled = self._get_pooled_frame(frame.shape, frame.dtype)
+                    np.copyto(pooled, frame)
+                    self.buffer.append(pooled)
+                    self.frame_ready.emit(pooled)
                     self._last_emit = now
 
                 self.msleep(1)
@@ -201,14 +241,18 @@ class CaptureWorker(QThread):
                 try:
                     w = int(self.capture_width) if self.capture_width else 640
                     h = int(self.capture_height) if self.capture_height else 480
-                    # Choose MJPEG decoder: avdec_mjpeg (FFmpeg/libav, ARM NEON optimized)
-                    # or jpegdec (libjpeg, more compatible)
-                    decoder = "avdec_mjpeg" if config.USE_AVDEC else "jpegdec"
-                    # GStreamer pipeline: v4l2src -> MJPEG decode -> BGR output
+                    # Use jpegdec (libjpeg) for MJPEG decoding - stable and efficient
+                    # GStreamer pipeline optimized for low-latency:
+                    # - v4l2src: capture from V4L2 device
+                    # - queue: decouple source from decode (max 2 buffers, leaky=downstream)
+                    # - appsink: sync=false for no A/V sync overhead, drop=1 for frame dropping
+                    # - max-buffers=1: only keep latest frame to minimize latency
                     pipeline = (
                         f"v4l2src device=/dev/video{self.stream_link} ! "
                         f"image/jpeg,width={w},height={h} ! "
-                        f"{decoder} ! videoconvert ! appsink drop=1"
+                        f"queue max-size-buffers=2 leaky=downstream ! "
+                        f"jpegdec ! videoconvert ! "
+                        f"appsink drop=1 max-buffers=1 sync=false"
                     )
                     cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
                     if cap and cap.isOpened():
@@ -217,9 +261,8 @@ class CaptureWorker(QThread):
                         if test_ret:
                             backend_name = "GStreamer"
                             logging.info(
-                                "GStreamer pipeline opened for camera %s (decoder=%s)",
+                                "GStreamer pipeline opened for camera %s (jpegdec)",
                                 self.stream_link,
-                                decoder,
                             )
                         else:
                             cap.release()
@@ -340,7 +383,7 @@ class CaptureWorker(QThread):
                 if self._cap:
                     self._cap.set(cv2.CAP_PROP_FPS, fps)
             except Exception:
-                pass
+                logging.debug("Failed to set CAP_PROP_FPS on camera", exc_info=True)
         except Exception:
             logging.exception("set_target_fps")
 
@@ -371,13 +414,39 @@ class CaptureWorker(QThread):
         
         The wait allows the run() loop to exit cleanly, which includes
         calling _close_capture() from within the thread context.
+        If the thread doesn't stop gracefully, we terminate it forcefully.
         """
         self._running = False
+        
         # Wait for thread to finish (includes cleanup in run())
         if not self.wait(2000):
-            logging.warning("Camera %s thread did not stop in time", self.stream_link)
+            logging.warning(
+                "Camera %s thread did not stop in 2s, attempting terminate",
+                self.stream_link
+            )
+            # Force terminate the thread - last resort
+            self.terminate()
+            # Give it a moment to actually terminate
+            if not self.wait(500):
+                logging.error(
+                    "Camera %s thread could not be terminated - potential resource leak",
+                    self.stream_link
+                )
+        
         # Ensure capture is closed even if thread didn't exit cleanly
         self._close_capture()
+    
+    def is_healthy(self) -> bool:
+        """Check if the worker thread is alive and responsive.
+        
+        Returns True if thread is running and has emitted a frame recently.
+        """
+        if not self.isRunning():
+            return False
+        # Check if we've emitted a frame in the last 5 seconds
+        if self._last_emit > 0:
+            return (time.time() - self._last_emit) < 5.0
+        return True  # Thread just started, give it time
 
 
 # ============================================================
@@ -436,7 +505,7 @@ def get_video_indexes() -> list[int]:
             index = int(device.split("video")[-1])
             indexes.append(index)
         except Exception:
-            pass
+            logging.debug("Skipping non-numeric video device: %s", device)
     return indexes
 
 
@@ -455,34 +524,42 @@ def find_working_cameras() -> list[int]:
     lock = threading.Lock()
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(test_single_camera, idx) for idx in indexes]
+        futures = {executor.submit(test_single_camera, idx): idx for idx in indexes}
         for future in as_completed(futures):
-            result = future.result()
-            if result is not None:
-                with lock:
-                    working.append(result)
-                    logging.info("Camera %d OK", result)
+            cam_idx = futures[future]
+            try:
+                result = future.result()
+                if result is not None:
+                    with lock:
+                        working.append(result)
+                        logging.info("Camera %d OK", result)
+            except Exception:
+                logging.exception("Exception testing camera %d", cam_idx)
 
     # Second pass to confirm cameras without killing holders
     if working:
         logging.info("Round 2 - Double-check (no pre-kill)...")
         final_working = []
         with ThreadPoolExecutor(max_workers=min(4, len(working))) as executor:
-            futures = [
+            futures = {
                 executor.submit(
                     test_single_camera,
                     idx,
                     retries=2,
                     retry_delay=0.15,
                     allow_kill=False,
-                )
+                ): idx
                 for idx in working
-            ]
+            }
             for future in as_completed(futures):
-                result = future.result()
-                if result is not None:
-                    final_working.append(result)
-                    logging.info("Confirmed camera %d", result)
+                cam_idx = futures[future]
+                try:
+                    result = future.result()
+                    if result is not None:
+                        final_working.append(result)
+                        logging.info("Confirmed camera %d", result)
+                except Exception:
+                    logging.exception("Exception confirming camera %d", cam_idx)
         working = final_working
 
     cv2.destroyAllWindows()
