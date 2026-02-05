@@ -106,8 +106,8 @@ def kill_device_holders(device_path: str, grace: float = 0.4) -> bool:
 
 
 def log_health_summary(
-    camera_widgets: list[CameraWidget],
-    placeholder_slots: list[CameraWidget],
+    camera_widgets: list[object],
+    placeholder_slots: list[object],
     active_indexes: set[int],
     failed_indexes: dict[int, float],
     stale_threshold_sec: float = 10.0,
@@ -129,20 +129,20 @@ def log_health_summary(
     for w in camera_widgets:
         has_frame = getattr(w, "_latest_frame", None) is not None
         last_ts = getattr(w, "_last_frame_ts", 0.0)
-        worker = getattr(w, "_worker", None)
+        worker = getattr(w, "worker", None)
         
         # Check if worker thread is healthy
         if worker is not None and hasattr(worker, "is_healthy"):
             if not worker.is_healthy():
                 unhealthy_workers += 1
-                cam_idx = getattr(w, "cam_index", "?")
+                cam_idx = getattr(w, "camera_stream_link", "?")
                 logging.warning("Camera %s worker unhealthy (thread dead or stalled)", cam_idx)
         
         # Check frame freshness
         if has_frame:
             if last_ts > 0 and (now - last_ts) > stale_threshold_sec:
                 stale += 1
-                cam_idx = getattr(w, "cam_index", "?")
+                cam_idx = getattr(w, "camera_stream_link", "?")
                 logging.warning(
                     "Camera %s has stale frame (%.1fs old)",
                     cam_idx,

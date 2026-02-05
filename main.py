@@ -113,6 +113,7 @@ def main() -> None:
         """Toggle night mode for all camera widgets."""
         night_mode_state["enabled"] = not night_mode_state["enabled"]
         enabled = night_mode_state["enabled"]
+        logging.info("Night mode %s", "enabled" if enabled else "disabled")
         for w in all_widgets:
             if hasattr(w, "set_night_mode"):
                 w.set_night_mode(enabled)
@@ -124,7 +125,6 @@ def main() -> None:
         height=1,
         stream_link=None,
         parent=central_widget,
-        buffer_size=1,
         target_fps=None,
         request_capture_size=None,
         ui_fps=5,
@@ -149,7 +149,6 @@ def main() -> None:
                 1,
                 cam_index,
                 parent=central_widget,
-                buffer_size=1,
                 target_fps=cap_fps,
                 request_capture_size=(cap_w, cap_h),
                 ui_fps=ui_fps,
@@ -163,7 +162,6 @@ def main() -> None:
                 1,
                 stream_link=None,
                 parent=central_widget,
-                buffer_size=1,
                 target_fps=None,
                 request_capture_size=None,
                 ui_fps=5,
@@ -324,7 +322,7 @@ def main() -> None:
 
     QtGui.QShortcut(QtGui.QKeySequence("q"), mw, quit_handler)
 
-    logging.info("Short click=fullscreen toggle. Hold 400ms=swap mode. Ctrl+Q=quit.")
+    logging.info("Short click=fullscreen toggle. Hold 400ms=swap mode. Q=quit.")
     sys.exit(app.exec())
 
 

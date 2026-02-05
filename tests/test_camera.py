@@ -108,7 +108,6 @@ class TestCaptureWorker:
         worker = CaptureWorker(
             stream_link=0,
             parent=None,
-            maxlen=1,
             target_fps=30.0,
             capture_width=640,
             capture_height=480,

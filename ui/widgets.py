@@ -2,7 +2,6 @@
 UI Widgets for Camera Dashboard.
 
 Contains CameraWidget for camera tiles and FullscreenOverlay for fullscreen view.
-Uses OpenGL by default for hardware-accelerated rendering (controlled by USE_OPENGL config).
 """
 
 from __future__ import annotations
@@ -21,100 +20,6 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSlot
 from core import config
 from core.camera import CaptureWorker
 
-# Optional OpenGL support for GPU-accelerated rendering
-_OPENGL_AVAILABLE = False
-QSurfaceFormat = None  # type: ignore[assignment,misc]
-try:
-    from PyQt6.QtOpenGLWidgets import QOpenGLWidget
-    from PyQt6.QtOpenGL import QOpenGLTexture
-    from PyQt6.QtGui import QSurfaceFormat
-    _OPENGL_AVAILABLE = True
-except ImportError:
-    pass
-
-
-class GLVideoLabel(QtWidgets.QWidget):
-    """OpenGL-accelerated video display widget.
-    
-    Uses GPU texture upload and rendering for reduced CPU usage
-    compared to QPainter-based rendering. Falls back to QLabel
-    if OpenGL is not available.
-    """
-    
-    def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
-        super().__init__(parent)
-        self._pixmap: Optional[QtGui.QPixmap] = None
-        self._text: str = ""
-        self._text_style: str = ""
-        self._use_opengl = config.USE_OPENGL and _OPENGL_AVAILABLE
-        
-        if self._use_opengl:
-            try:
-                # Set up OpenGL surface format for better performance
-                fmt = QSurfaceFormat()
-                fmt.setSwapBehavior(QSurfaceFormat.SwapBehavior.DoubleBuffer)
-                fmt.setSwapInterval(0)  # Disable vsync for lower latency
-                QSurfaceFormat.setDefaultFormat(fmt)
-            except Exception:
-                self._use_opengl = False
-        
-        self.setMinimumSize(1, 1)
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
-    
-    def setPixmap(self, pixmap: QtGui.QPixmap) -> None:
-        """Set the pixmap to display."""
-        self._pixmap = pixmap
-        self._text = ""
-        self.update()
-    
-    def setText(self, text: str) -> None:
-        """Set text to display (clears pixmap)."""
-        self._text = text
-        if text:
-            self._pixmap = None
-        self.update()
-    
-    def setStyleSheet(self, styleSheet: str) -> None:  # noqa: N802,N803
-        """Store style for text rendering."""
-        self._text_style = styleSheet
-        super().setStyleSheet(styleSheet)
-    
-    def setAlignment(self, alignment: Qt.AlignmentFlag) -> None:
-        """Compatibility method (alignment handled in paintEvent)."""
-        pass
-    
-    def setScaledContents(self, scaled: bool) -> None:
-        """Compatibility method (always scaled)."""
-        pass
-    
-    def paintEvent(self, a0: Optional[QtGui.QPaintEvent]) -> None:
-        """Render pixmap or text using QPainter (GPU-accelerated when possible)."""
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, False)
-        
-        # Fill background
-        painter.fillRect(self.rect(), Qt.GlobalColor.black)
-        
-        if self._pixmap and not self._pixmap.isNull():
-            # Scale pixmap to fit widget while maintaining aspect ratio
-            scaled = self._pixmap.scaled(
-                self.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.FastTransformation
-            )
-            # Center the scaled pixmap
-            x = (self.width() - scaled.width()) // 2
-            y = (self.height() - scaled.height()) // 2
-            painter.drawPixmap(x, y, scaled)
-        elif self._text:
-            # Draw centered text
-            painter.setPen(QtGui.QColor("#bbbbbb"))
-            font = painter.font()
-            font.setPointSize(18)
-            painter.setFont(font)
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._text)
-        
-        painter.end()
 
 
 class FullscreenOverlay(QtWidgets.QWidget):
@@ -176,7 +81,6 @@ class CameraWidget(QtWidgets.QWidget):
         stream_link: Optional[int] = 0,
         aspect_ratio: bool = False,
         parent: Optional[QtWidgets.QWidget] = None,
-        buffer_size: int = 1,
         target_fps: Optional[float] = None,
         request_capture_size: Optional[tuple[int, int]] = (640, 480),
         ui_fps: int = 15,
@@ -230,15 +134,9 @@ class CameraWidget(QtWidgets.QWidget):
         self.setObjectName(self.widget_id)
 
         # Video display label or settings title
-        # Use OpenGL-accelerated widget when available and enabled for better GPU usage
-        use_gl = config.USE_OPENGL and _OPENGL_AVAILABLE and not settings_mode
-        if use_gl:
-            self.video_label = GLVideoLabel(self)
-            logging.debug("Using OpenGL video label for %s", self.widget_id)
-        else:
-            self.video_label = QtWidgets.QLabel(self)
-            self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.video_label.setScaledContents(True)
+        self.video_label = QtWidgets.QLabel(self)
+        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.video_label.setScaledContents(True)
         self.video_label.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Expanding,
@@ -328,7 +226,6 @@ class CameraWidget(QtWidgets.QWidget):
             self.worker = CaptureWorker(
                 stream_link,
                 parent=self,
-                maxlen=buffer_size,
                 target_fps=target_fps,
                 capture_width=cap_w,
                 capture_height=cap_h,
@@ -418,7 +315,6 @@ class CameraWidget(QtWidgets.QWidget):
         self.worker = CaptureWorker(
             stream_link,
             parent=self,
-            maxlen=1,
             target_fps=target_fps,
             capture_width=cap_w,
             capture_height=cap_h,
@@ -686,9 +582,15 @@ class CameraWidget(QtWidgets.QWidget):
             if frame_bgr is None:
                 return
             # Only store; UI thread renders on its timer.
+            previous_frame = self._latest_frame
             self._latest_frame = frame_bgr
             self._frame_id += 1
             self._last_frame_ts = time.time()
+            if previous_frame is not None and self.worker is not None:
+                try:
+                    self.worker.return_frame(previous_frame)
+                except Exception:
+                    logging.debug("Failed to return frame to pool", exc_info=True)
         except Exception:
             logging.exception("on_frame")
 
@@ -991,7 +893,6 @@ class CameraWidget(QtWidgets.QWidget):
         self.worker = CaptureWorker(
             self.camera_stream_link,
             parent=self,
-            maxlen=1,
             target_fps=target_fps,
             capture_width=cap_w,
             capture_height=cap_h,
@@ -1004,6 +905,8 @@ class CameraWidget(QtWidgets.QWidget):
     def _log_status(self) -> None:
         """Periodic status log for observability."""
         if self.settings_mode:
+            return
+        if self.camera_stream_link is None:
             return
         now = time.time()
         if (now - self._last_status_log_ts) < self._last_status_log_interval_sec:
@@ -1031,7 +934,6 @@ class CameraWidget(QtWidgets.QWidget):
     def set_night_mode(self, enabled: bool) -> None:
         """Enable or disable night mode rendering."""
         self.night_mode_enabled = bool(enabled)
-        logging.info("Night mode %s", "enabled" if enabled else "disabled")
 
     def set_night_mode_button_label(self, enabled: bool) -> None:
         """Update settings tile button label for night mode."""

@@ -40,7 +40,6 @@ class CaptureWorker(QThread):
         self,
         stream_link: Union[int, str],
         parent: Optional[QObject] = None,
-        maxlen: int = 1,
         target_fps: Optional[float] = None,
         capture_width: Optional[int] = None,
         capture_height: Optional[int] = None,
@@ -60,8 +59,6 @@ class CaptureWorker(QThread):
         self._open_fail_count = 0
         # Track if using GStreamer backend for proper cleanup
         self._using_gstreamer = False
-        # Buffer holds most recent frames, used to decouple capture from UI.
-        self.buffer: deque[NDArray[np.uint8]] = deque(maxlen=maxlen)
         # Lock protects changes to FPS/emit interval from other threads.
         self._fps_lock = threading.Lock()
         
@@ -98,6 +95,10 @@ class CaptureWorker(QThread):
                 and len(self._frame_pool) < self.FRAME_POOL_SIZE
             ):
                 self._frame_pool.append(frame)
+
+    def return_frame(self, frame: NDArray[np.uint8]) -> None:
+        """Public helper to return a frame buffer to the pool."""
+        self._return_to_pool(frame)
 
     def run(self) -> None:
         """Capture loop: open camera, grab frames, emit, reconnect on failure."""
@@ -162,7 +163,6 @@ class CaptureWorker(QThread):
                     # Use pooled frame to reduce allocations
                     pooled = self._get_pooled_frame(frame.shape, frame.dtype)
                     np.copyto(pooled, frame)
-                    self.buffer.append(pooled)
                     self.frame_ready.emit(pooled)
                     self._last_emit = now
 

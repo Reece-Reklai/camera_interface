@@ -77,10 +77,6 @@ PROFILE_UI_FPS = 15
 # GStreamer pipeline support
 USE_GSTREAMER = True
 
-# OpenGL rendering - uses GPU for frame compositing, reducing CPU usage on Pi 4/5
-# Requires Qt OpenGL support (PyQt6-OpenGL)
-USE_OPENGL = True
-
 # Render overhead compensation (ms)
 RENDER_OVERHEAD_MS = 3
 
@@ -163,7 +159,7 @@ def apply_config(parser: configparser.ConfigParser) -> None:
     global RESCAN_INTERVAL_MS, FAILED_CAMERA_COOLDOWN_SEC, CAMERA_SLOT_COUNT
     global HEALTH_LOG_INTERVAL_SEC, KILL_DEVICE_HOLDERS
     global PROFILE_CAPTURE_WIDTH, PROFILE_CAPTURE_HEIGHT, PROFILE_CAPTURE_FPS
-    global PROFILE_UI_FPS, USE_GSTREAMER, USE_OPENGL
+    global PROFILE_UI_FPS, USE_GSTREAMER
 
     if parser.has_section("logging"):
         LOG_LEVEL = parser.get("logging", "level", fallback=LOG_LEVEL)
@@ -299,9 +295,6 @@ def apply_config(parser: configparser.ConfigParser) -> None:
         )
         USE_GSTREAMER = _as_bool(
             parser.get("camera", "use_gstreamer", fallback=USE_GSTREAMER), USE_GSTREAMER
-        )
-        USE_OPENGL = _as_bool(
-            parser.get("camera", "use_opengl", fallback=USE_OPENGL), USE_OPENGL
         )
 
     if parser.has_section("profile"):

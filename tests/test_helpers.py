@@ -159,20 +159,20 @@ class TestLogHealthSummary:
         mock_widget1 = mock.MagicMock()
         mock_widget1._latest_frame = "frame_data"
         mock_widget1._last_frame_ts = now  # fresh frame
-        mock_widget1._worker = None
-        mock_widget1.cam_index = 0
+        mock_widget1.worker = None
+        mock_widget1.camera_stream_link = 0
         
         mock_widget2 = mock.MagicMock()
         mock_widget2._latest_frame = None
         mock_widget2._last_frame_ts = 0.0
-        mock_widget2._worker = None
-        mock_widget2.cam_index = 2
+        mock_widget2.worker = None
+        mock_widget2.camera_stream_link = 2
         
         mock_widget3 = mock.MagicMock()
         mock_widget3._latest_frame = "frame_data"
         mock_widget3._last_frame_ts = now  # fresh frame
-        mock_widget3._worker = None
-        mock_widget3.cam_index = 4
+        mock_widget3.worker = None
+        mock_widget3.camera_stream_link = 4
 
         camera_widgets = [mock_widget1, mock_widget2, mock_widget3]
         placeholder_slots = [mock.MagicMock()]
@@ -199,8 +199,8 @@ class TestLogHealthSummary:
         mock_widget = mock.MagicMock()
         mock_widget._latest_frame = "frame_data"
         mock_widget._last_frame_ts = now - 15.0  # stale
-        mock_widget._worker = None
-        mock_widget.cam_index = 0
+        mock_widget.worker = None
+        mock_widget.camera_stream_link = 0
 
         helpers.log_health_summary(
             [mock_widget], [], set(), {}
@@ -225,8 +225,8 @@ class TestLogHealthSummary:
         mock_widget = mock.MagicMock()
         mock_widget._latest_frame = "frame_data"
         mock_widget._last_frame_ts = now
-        mock_widget._worker = mock_worker
-        mock_widget.cam_index = 0
+        mock_widget.worker = mock_worker
+        mock_widget.camera_stream_link = 0
 
         helpers.log_health_summary(
             [mock_widget], [], set(), {}
