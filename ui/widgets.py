@@ -225,7 +225,7 @@ class CameraWidget(QtWidgets.QWidget):
 
         # Visual styles for normal and swap-ready state
         self.normal_style = "border: 2px solid #555; background: black;"
-        self.swap_ready_style = "border: 4px solid #FFFF00; background: black;"
+        self.swap_ready_style = "border: 6px solid #FFFF00; background: black;"
         self.setStyleSheet(self.normal_style)
         self.setObjectName(self.widget_id)
 
@@ -251,7 +251,8 @@ class CameraWidget(QtWidgets.QWidget):
         )
 
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(2, 2, 2, 2)  # Small margin to show border
+        self._layout = layout  # Store reference for swap mode margin changes
 
         # Settings tile uses buttons instead of a video stream.
         if self.settings_mode:
@@ -490,7 +491,7 @@ class CameraWidget(QtWidgets.QWidget):
                 return True
 
             hold_time = (time.time() * 1000.0) - self._press_time
-            logging.debug("Touch release %s hold=%dms", self.widget_id, int(hold_time))
+            logging.debug("Release %s hold=%dms", self.widget_id, int(hold_time))
 
             swap_parent = self._grid_parent
             if not swap_parent or not hasattr(swap_parent, "selected_camera"):
@@ -521,6 +522,7 @@ class CameraWidget(QtWidgets.QWidget):
                 logging.debug("ENTER swap %s", self.widget_id)
                 setattr(swap_parent, "selected_camera", self)
                 self.swap_active = True
+                self._layout.setContentsMargins(6, 6, 6, 6)  # Expand margin for yellow border
                 self.setStyleSheet(self.swap_ready_style)
                 self._reset_mouse_state()
                 return True
@@ -590,6 +592,7 @@ class CameraWidget(QtWidgets.QWidget):
                 logging.debug("ENTER swap %s", self.widget_id)
                 setattr(swap_parent, "selected_camera", self)
                 self.swap_active = True
+                self._layout.setContentsMargins(6, 6, 6, 6)  # Expand margin for yellow border
                 self.setStyleSheet(self.swap_ready_style)
                 self._reset_mouse_state()
                 return True
@@ -860,7 +863,10 @@ class CameraWidget(QtWidgets.QWidget):
     def on_status_changed(self, online: bool) -> None:
         """Update UI when camera goes online or offline."""
         if online:
-            self.setStyleSheet(self.normal_style)
+            # Preserve yellow border if swap mode is active
+            self.setStyleSheet(
+                self.swap_ready_style if self.swap_active else self.normal_style
+            )
             self.video_label.setText("")
             self._last_frame_ts = time.time()
         else:
@@ -869,11 +875,14 @@ class CameraWidget(QtWidgets.QWidget):
             self._render_placeholder("DISCONNECTED")
 
     def reset_style(self) -> None:
-        """Restore default border styling."""
+        """Restore default border styling and margins."""
         self.video_label.setStyleSheet("")
-        self.setStyleSheet(
-            self.swap_ready_style if self.swap_active else self.normal_style
-        )
+        if self.swap_active:
+            self._layout.setContentsMargins(6, 6, 6, 6)
+            self.setStyleSheet(self.swap_ready_style)
+        else:
+            self._layout.setContentsMargins(2, 2, 2, 2)
+            self.setStyleSheet(self.normal_style)
 
     def _print_fps(self) -> None:
         """Log rendering FPS for this widget."""

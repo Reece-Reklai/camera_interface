@@ -40,12 +40,12 @@ LOG_FILE_ENV = os.environ.get("CAMERA_DASHBOARD_LOG_FILE")
 # ============================================================
 DYNAMIC_FPS_ENABLED = True
 PERF_CHECK_INTERVAL_MS = 2000
-MIN_DYNAMIC_FPS = 5
+MIN_DYNAMIC_FPS = 10
 MIN_DYNAMIC_UI_FPS = 10
 UI_FPS_STEP = 2
 CPU_LOAD_THRESHOLD = 0.75
-CPU_TEMP_THRESHOLD_C = 70.0
-STRESS_HOLD_COUNT = 2
+CPU_TEMP_THRESHOLD_C = 75.0
+STRESS_HOLD_COUNT = 3
 RECOVER_HOLD_COUNT = 3
 
 # Stale frame detection + bounded auto-restart policy.

@@ -369,7 +369,7 @@ class CaptureWorker(QThread):
             self._emit_interval = 1.0 / max(1.0, fps)
 
     def set_target_fps(self, fps: Optional[float]) -> None:
-        """Update target FPS and camera setting at runtime."""
+        """Update target FPS at runtime (software throttling only)."""
         if fps is None:
             return
         try:
@@ -379,11 +379,9 @@ class CaptureWorker(QThread):
             with self._fps_lock:
                 self._target_fps = fps
                 self._emit_interval = 1.0 / max(1.0, fps)
-            try:
-                if self._cap:
-                    self._cap.set(cv2.CAP_PROP_FPS, fps)
-            except Exception:
-                logging.debug("Failed to set CAP_PROP_FPS on camera", exc_info=True)
+            # Note: We don't call cap.set(CAP_PROP_FPS) here because:
+            # 1. GStreamer pipelines restart when FPS is changed, causing disconnects
+            # 2. Software throttling via _emit_interval is sufficient for stress management
         except Exception:
             logging.exception("set_target_fps")
 
