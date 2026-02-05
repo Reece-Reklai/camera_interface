@@ -1,6 +1,7 @@
 [Unit]
 Description=Camera Dashboard
-After=network.target
+After=network.target graphical.target
+Wants=graphical.target
 
 [Service]
 Type=notify
@@ -10,13 +11,50 @@ Restart=always
 RestartSec=2
 User=pi
 Group=pi
+
+# Environment
 Environment=PYTHONUNBUFFERED=1
 Environment=CAMERA_DASHBOARD_CONFIG=/home/pi/camera_dashboard/config.ini
 Environment=CAMERA_DASHBOARD_LOG_FILE=/home/pi/camera_dashboard/logs/camera_dashboard.log
+# Disable Python's GC during critical sections (reduces jitter)
+Environment=PYTHONGC=0
+# Use malloc instead of Python's pymalloc for better memory profiling
+Environment=PYTHONMALLOC=malloc
+
+# Watchdog - service must send heartbeat every 15s or be restarted
 WatchdogSec=15
 NotifyAccess=main
+
+# Scheduling priority (higher priority than normal processes)
 Nice=-5
+# Real-time I/O priority for camera capture
+IOSchedulingClass=realtime
+IOSchedulingPriority=4
+
+# Memory limits to prevent OOM killing other services
+# Adjust based on your Pi model (this is for Pi 4 with 4GB)
+MemoryMax=1G
+MemoryHigh=800M
+
+# Security hardening
 NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/pi/camera_dashboard/logs
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=false
+# Allow access to video devices
+DeviceAllow=/dev/video* rw
+DeviceAllow=/dev/dri/* rw
+SupplementaryGroups=video render
+
+# Limit open file descriptors
+LimitNOFILE=4096
+
+# CPU affinity - pin to specific cores (optional, uncomment for Pi 4/5)
+# CPUAffinity=2 3
 
 [Install]
 WantedBy=multi-user.target

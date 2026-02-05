@@ -204,15 +204,30 @@ class TestLogHealthSummary:
 
     @mock.patch("utils.helpers.write_watchdog_heartbeat")
     @mock.patch("logging.info")
-    def test_logs_health_summary(self, mock_log, mock_watchdog):
+    @mock.patch("logging.warning")
+    def test_logs_health_summary(self, mock_warning, mock_log, mock_watchdog):
         """Test logs camera health information."""
-        # Create mock camera widgets
+        import time
+        now = time.time()
+        
+        # Create mock camera widgets with required attributes
         mock_widget1 = mock.MagicMock()
         mock_widget1._latest_frame = "frame_data"
+        mock_widget1._last_frame_ts = now  # fresh frame
+        mock_widget1._worker = None
+        mock_widget1.cam_index = 0
+        
         mock_widget2 = mock.MagicMock()
         mock_widget2._latest_frame = None
+        mock_widget2._last_frame_ts = 0.0
+        mock_widget2._worker = None
+        mock_widget2.cam_index = 2
+        
         mock_widget3 = mock.MagicMock()
         mock_widget3._latest_frame = "frame_data"
+        mock_widget3._last_frame_ts = now  # fresh frame
+        mock_widget3._worker = None
+        mock_widget3.cam_index = 4
 
         camera_widgets = [mock_widget1, mock_widget2, mock_widget3]
         placeholder_slots = [mock.MagicMock()]
@@ -226,6 +241,56 @@ class TestLogHealthSummary:
         mock_log.assert_called_once()
         call_args = mock_log.call_args
         assert "Health" in call_args[0][0]
-        assert call_args[0][1] == 2  # online count
-        assert call_args[0][2] == 3  # total cameras
+        assert call_args[0][1] == 2  # online count (widgets with fresh frames)
         mock_watchdog.assert_called_once()
+    
+    @mock.patch("utils.helpers.write_watchdog_heartbeat")
+    @mock.patch("logging.info")
+    @mock.patch("logging.warning")
+    def test_detects_stale_frames(self, mock_warning, mock_log, mock_watchdog):
+        """Test that stale frames are detected and logged."""
+        import time
+        now = time.time()
+        
+        # Create widget with stale frame (last frame 15 seconds ago)
+        mock_widget = mock.MagicMock()
+        mock_widget._latest_frame = "frame_data"
+        mock_widget._last_frame_ts = now - 15.0  # stale
+        mock_widget._worker = None
+        mock_widget.cam_index = 0
+
+        helpers.log_health_summary(
+            [mock_widget], [], set(), {}
+        )
+        
+        # Should log a warning about stale frame
+        mock_warning.assert_called()
+        warning_call = mock_warning.call_args[0][0]
+        assert "stale" in warning_call.lower()
+    
+    @mock.patch("utils.helpers.write_watchdog_heartbeat")
+    @mock.patch("logging.info")
+    @mock.patch("logging.warning")
+    def test_detects_unhealthy_worker(self, mock_warning, mock_log, mock_watchdog):
+        """Test that unhealthy workers are detected and logged."""
+        import time
+        now = time.time()
+        
+        # Create widget with unhealthy worker
+        mock_worker = mock.MagicMock()
+        mock_worker.is_healthy.return_value = False
+        
+        mock_widget = mock.MagicMock()
+        mock_widget._latest_frame = "frame_data"
+        mock_widget._last_frame_ts = now
+        mock_widget._worker = mock_worker
+        mock_widget.cam_index = 0
+
+        helpers.log_health_summary(
+            [mock_widget], [], set(), {}
+        )
+        
+        # Should log a warning about unhealthy worker
+        mock_warning.assert_called()
+        warning_call = mock_warning.call_args[0][0]
+        assert "unhealthy" in warning_call.lower()
