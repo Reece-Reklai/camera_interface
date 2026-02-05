@@ -166,7 +166,7 @@ sudo systemctl status camera-dashboard
 | **Short Click/Tap**      | Toggle fullscreen view              |
 | **Long Press (400ms+)**  | Enter swap mode (yellow border)     |
 | **Click Another Camera** | Swap positions with selected camera |
-| **Q or Ctrl+Q**          | Exit application                    |
+| **Q**          | Exit application                    |
 | **Ctrl+C**               | Exit from terminal                  |
 
 ### Camera Status Indicators
