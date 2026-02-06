@@ -84,6 +84,7 @@ class CaptureWorker(QThread):
         self.capture_width = capture_width
         self.capture_height = capture_height
         self._online = False
+        self._start_ts = time.time()
         self._open_fail_count = 0
         # Track if using GStreamer backend for proper cleanup
         self._using_gstreamer = False
@@ -200,6 +201,10 @@ class CaptureWorker(QThread):
             except Exception:
                 logging.exception("Exception in CaptureWorker %s", self.stream_link)
                 time.sleep(0.2)
+
+        if self._online:
+            self._online = False
+            self.status_changed.emit(False)
 
         self._close_capture()
         logging.info("Camera %s thread stopped", self.stream_link)
@@ -470,7 +475,7 @@ class CaptureWorker(QThread):
         # Check if we've emitted a frame in the last 5 seconds
         if self._last_emit > 0:
             return (time.time() - self._last_emit) < 5.0
-        return True  # Thread just started, give it time
+        return (time.time() - self._start_ts) < 5.0
 
     def get_fourcc(self) -> str:
         """Return the cached FOURCC string (thread-safe, no lock needed for reads)."""

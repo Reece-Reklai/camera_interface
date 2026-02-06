@@ -1,7 +1,7 @@
 """
 Performance monitoring for Camera Dashboard.
 
-Handles CPU load, temperature monitoring, and dynamic FPS adjustment.
+Handles CPU load and temperature monitoring.
 """
 
 from __future__ import annotations

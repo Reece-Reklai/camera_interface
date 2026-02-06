@@ -8,7 +8,6 @@ with dynamic FPS adjustment, hot-plug support, and fullscreen viewing.
 
 from __future__ import annotations
 
-import atexit
 import logging
 import os
 import signal
@@ -29,8 +28,11 @@ from ui import CameraWidget, get_smart_grid
 from utils import log_health_summary
 
 
-def safe_cleanup(widgets: list[CameraWidget]) -> None:
+def safe_cleanup(widgets: list[CameraWidget], cleaned_flag: list[bool]) -> None:
     """Gracefully stop all camera worker threads."""
+    if cleaned_flag[0]:
+        return
+    cleaned_flag[0] = True
     logging.info("Cleaning all cameras")
     for w in list(widgets):
         try:
@@ -55,13 +57,13 @@ def main() -> None:
     all_widgets = []
     placeholder_slots = []
 
+    cleaned_flag = [False]
+
     # Clean shutdown on Ctrl+C
     def on_sigint(sig, frame):
-        safe_cleanup(camera_widgets)
-        sys.exit(0)
+        QtWidgets.QApplication.quit()
 
     signal.signal(signal.SIGINT, on_sigint)
-    atexit.register(lambda: safe_cleanup(camera_widgets))
 
     app.setStyle(QtWidgets.QStyleFactory.create("Fusion"))
     app.setStyleSheet("QWidget { background: #2b2b2b; color: #ffffff; }")
@@ -103,7 +105,7 @@ def main() -> None:
     def restart_app():
         """Restart the entire process (used by settings tile)."""
         logging.info("Restart requested from settings.")
-        safe_cleanup(camera_widgets)
+        safe_cleanup(camera_widgets, cleaned_flag)
         python = sys.executable
         try:
             os.execv(python, [python] + sys.argv)
@@ -356,10 +358,10 @@ def main() -> None:
         )
         health_timer.start()
 
-    app.aboutToQuit.connect(lambda: safe_cleanup(camera_widgets))
+    app.aboutToQuit.connect(lambda: safe_cleanup(camera_widgets, cleaned_flag))
 
     def quit_handler() -> None:
-        safe_cleanup(camera_widgets)
+        safe_cleanup(camera_widgets, cleaned_flag)
         app.quit()
 
     QtGui.QShortcut(QtGui.QKeySequence("q"), mw, quit_handler)

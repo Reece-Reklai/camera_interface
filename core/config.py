@@ -18,7 +18,6 @@ from typing import Any, Optional
 # ============================================================
 # DEBUG FLAGS
 # ============================================================
-DEBUG_PRINTS = False
 UI_FPS_LOGGING = False
 
 
@@ -41,7 +40,7 @@ LOG_FILE_ENV = os.environ.get("CAMERA_DASHBOARD_LOG_FILE")
 DYNAMIC_FPS_ENABLED = True
 PERF_CHECK_INTERVAL_MS = 2000
 MIN_DYNAMIC_FPS = 10
-MIN_DYNAMIC_UI_FPS = 10
+MIN_DYNAMIC_UI_FPS = 12
 UI_FPS_STEP = 2
 CPU_LOAD_THRESHOLD = 0.75
 CPU_TEMP_THRESHOLD_C = 75.0
@@ -71,8 +70,8 @@ KILL_DEVICE_HOLDERS = True
 
 PROFILE_CAPTURE_WIDTH = 640
 PROFILE_CAPTURE_HEIGHT = 480
-PROFILE_CAPTURE_FPS = 20
-PROFILE_UI_FPS = 15
+PROFILE_CAPTURE_FPS = 25
+PROFILE_UI_FPS = 20
 
 # GStreamer pipeline support
 USE_GSTREAMER = True
@@ -385,7 +384,7 @@ def choose_profile(camera_count: int) -> tuple[int, int, int, int]:
         scale = 0.5
         fps_scale = 0.6
     elif camera_count >= 4:
-        # 4-5 cameras: drop to 480x360 @ 18fps
+        # 4-5 cameras: drop to 480x352 @ 18fps
         scale = 0.75
         fps_scale = 0.75
     elif camera_count >= 2:

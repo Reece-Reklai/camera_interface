@@ -4,7 +4,7 @@ A multi-camera monitoring system optimized for Raspberry Pi, designed for blind-
 
 ### Note: Comprehensive Logging, Testing, and Performance Optimization was done through OPENCODE
 
-![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
+![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
 ![Platform](https://img.shields.io/badge/Platform-Raspberry%20Pi%20%7C%20Linux-lightgrey.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 
@@ -30,7 +30,7 @@ A multi-camera monitoring system optimized for Raspberry Pi, designed for blind-
 - **GStreamer Pipeline**: Hardware-accelerated MJPEG decoding with jpegdec (with V4L2 fallback)
 - **Dynamic FPS Adjustment**: Automatically reduces frame rate under CPU/thermal stress
 - **Threaded Architecture**: Separate capture threads ensure smooth UI performance
-- **Efficient Rendering**: 20 FPS UI refresh rate balances smoothness and CPU usage
+- **Efficient Rendering**: Configurable UI refresh rate (default 20 FPS in config.ini) balances smoothness and CPU usage
 
 ### System Integration
 
@@ -56,7 +56,7 @@ A multi-camera monitoring system optimized for Raspberry Pi, designed for blind-
 
 ### Software Minimum Dependencies
 
-- Python 3.8+
+- Python 3.9+
 - PyQt6 (Qt6 GUI framework)
 - OpenCV (with GStreamer support)
 - GStreamer 1.0 (for optimized capture with jpegdec)
@@ -293,9 +293,9 @@ python -m pytest tests/ --cov=core --cov=ui --cov=utils
 
 | Cameras | Resolution | Capture FPS | UI FPS | CPU Usage | Memory |
 | ------- | ---------- | ----------- | ------ | --------- | ------ |
-| 1       | 640x480    | 20          | 20     | ~15%      | ~150MB |
-| 2       | 640x480    | 20          | 20     | ~25%      | ~180MB |
-| 3       | 640x480    | 20          | 20     | ~35%      | ~200MB |
+| 1       | 640x480    | 25          | 20     | ~15%      | ~150MB |
+| 2       | 640x480    | 22          | 18     | ~25%      | ~180MB |
+| 3       | 640x480    | 22          | 18     | ~35%      | ~200MB |
 
 ---
 
@@ -371,7 +371,7 @@ cat logs/camera_dashboard.log | tail -50
 
 1. `CaptureWorker` grabs frames via GStreamer or V4L2
 2. Frames emitted to main thread via Qt signals
-3. UI renders at fixed interval (20 FPS default) using latest frame
+3. UI renders at fixed interval (configurable; 20 FPS default in config.ini) using latest frame
 4. Performance monitor adjusts FPS based on system load
 
 ---

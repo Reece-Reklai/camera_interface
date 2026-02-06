@@ -36,6 +36,11 @@ if ! command_exists python3; then
   echo "python3 is required but not found. Please install Python 3 and try again."
   exit 1
 fi
+python3 - <<'PY'
+import sys
+if sys.version_info < (3, 9):
+    raise SystemExit("Python 3.9+ is required")
+PY
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"

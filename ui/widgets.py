@@ -549,6 +549,35 @@ class CameraWidget(QtWidgets.QWidget):
         except Exception:
             logging.exception("on_frame")
 
+    def _release_current_frame(self, worker: Optional[CaptureWorker] = None) -> None:
+        """Return current frame buffer to pool and clear reference."""
+        if self._latest_frame is None:
+            return
+        if worker is None:
+            worker = self.worker
+        if worker is not None:
+            try:
+                worker.return_frame(self._latest_frame)
+            except Exception:
+                logging.debug("Failed to return frame to pool", exc_info=True)
+        self._latest_frame = None
+
+    def _dispose_worker(self, worker: CaptureWorker) -> None:
+        """Disconnect and schedule a worker for deletion."""
+        try:
+            worker.frame_ready.disconnect(self.on_frame)
+        except Exception:
+            pass
+        try:
+            worker.status_changed.disconnect(self.on_status_changed)
+        except Exception:
+            pass
+        try:
+            worker.setParent(None)
+            worker.deleteLater()
+        except Exception:
+            pass
+
     def _render_placeholder(self, text: str) -> None:
         """Render placeholder text when no frame is available."""
         if self.settings_mode:
@@ -588,7 +617,7 @@ class CameraWidget(QtWidgets.QWidget):
                     self.camera_stream_link,
                     stale_duration,
                 )
-                self._latest_frame = None
+                self._release_current_frame()
                 # Reset frame IDs to ensure placeholder renders on next call
                 self._last_rendered_id = -1
                 self._render_placeholder("DISCONNECTED")
@@ -729,7 +758,7 @@ class CameraWidget(QtWidgets.QWidget):
             self.video_label.setText("")
             self._last_frame_ts = time.time()
         else:
-            self._latest_frame = None
+            self._release_current_frame()
             self._last_rendered_id = -1
             self._render_placeholder("DISCONNECTED")
 
@@ -842,6 +871,8 @@ class CameraWidget(QtWidgets.QWidget):
             # Don't create a new worker if old one is still running
             # This prevents resource conflicts
             return
+
+        self._dispose_worker(old_worker)
         
         # camera_stream_link is guaranteed to be set if capture_enabled is True
         if self.camera_stream_link is None:
@@ -910,17 +941,21 @@ class CameraWidget(QtWidgets.QWidget):
         detached_index = self.camera_stream_link
         
         # Stop capture worker
-        if self.worker:
+        worker = self.worker
+        if worker:
             try:
-                self.worker.stop()
+                worker.stop()
             except Exception:
                 logging.debug("Error stopping worker during detach", exc_info=True)
+            self._release_current_frame(worker)
+            self._dispose_worker(worker)
             self.worker = None
         
         # Reset to placeholder state
         self.capture_enabled = False
         self.camera_stream_link = None
-        self._latest_frame = None
+        if self._latest_frame is not None:
+            self._release_current_frame()
         self._last_frame_ts = 0.0
         self._frame_id = 0
         self._last_rendered_id = -1
