@@ -179,8 +179,8 @@ StartLimitBurst=5
 [Service]
 Type=simple
 WorkingDirectory=$SCRIPT_DIR
-# Wait up to 30s for Wayland display socket before launching (prevents wasting restart budget on boot)
-ExecStartPre=/bin/bash -c 'for i in \$(seq 1 30); do [ -e /run/user/$USER_UID/wayland-0 ] && exit 0; sleep 1; done; exit 0'
+# Wait up to 30s for display server (Wayland or X11) before launching (prevents wasting restart budget on boot)
+ExecStartPre=/bin/bash -c 'for i in \$(seq 1 30); do [ -e /run/user/$USER_UID/wayland-0 ] && exit 0; [ -e /tmp/.X11-unix/X0 ] && exit 0; sleep 1; done; exit 0'
 ExecStart=$SCRIPT_DIR/.venv/bin/python3 $SCRIPT_DIR/main.py
 # Display access (Wayland + XWayland fallback)
 Environment=DISPLAY=:0
