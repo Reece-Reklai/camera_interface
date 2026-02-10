@@ -284,3 +284,10 @@ Controls:
 - Hold click 400ms: Enter swap mode
 
 EOF
+
+# ---------- 11) reboot to apply all changes ----------
+
+echo "Rebooting in 5 seconds to apply all changes..."
+echo "(video group permissions, systemd service, auto-start on boot)"
+sleep 5
+sudo reboot
