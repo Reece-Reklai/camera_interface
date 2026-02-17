@@ -369,40 +369,10 @@ def configure_logging() -> None:
 def choose_profile(camera_count: int) -> tuple[int, int, int, int]:
     """Pick capture resolution and FPS based on camera count.
     
-    Dynamically scales resolution down when more cameras are active
-    to maintain smooth performance on resource-constrained devices.
+    Resolution and FPS are exactly as configured in config.ini.
+    Dynamic FPS feature will adjust up/down at runtime based on CPU load.
     
     Returns: (width, height, capture_fps, ui_fps)
     """
-    # Base configuration from config
-    base_w = PROFILE_CAPTURE_WIDTH
-    base_h = PROFILE_CAPTURE_HEIGHT
-    base_fps = PROFILE_CAPTURE_FPS
-    base_ui_fps = PROFILE_UI_FPS
-    
-    # Scale down for multiple cameras to reduce CPU/memory load
-    # These thresholds work well on Raspberry Pi 4/5
-    if camera_count >= 6:
-        # 6+ cameras: drop to 320x240 @ 15fps
-        scale = 0.5
-        fps_scale = 0.6
-    elif camera_count >= 4:
-        # 4-5 cameras: drop to 480x352 @ 18fps
-        scale = 0.75
-        fps_scale = 0.75
-    elif camera_count >= 2:
-        # 2-3 cameras: use configured resolution @ slightly reduced fps
-        scale = 1.0
-        fps_scale = 0.9
-    else:
-        # 1 camera: full configured resolution and FPS
-        scale = 1.0
-        fps_scale = 1.0
-    
-    # Apply scaling (ensure dimensions are multiples of 16 for codec efficiency)
-    scaled_w = max(160, int(base_w * scale) // 16 * 16)
-    scaled_h = max(120, int(base_h * scale) // 16 * 16)
-    scaled_fps = max(MIN_DYNAMIC_FPS, int(base_fps * fps_scale))
-    scaled_ui_fps = max(MIN_DYNAMIC_UI_FPS, int(base_ui_fps * fps_scale))
-    
-    return (scaled_w, scaled_h, scaled_fps, scaled_ui_fps)
+    # Exact values from config - no scaling
+    return (PROFILE_CAPTURE_WIDTH, PROFILE_CAPTURE_HEIGHT, PROFILE_CAPTURE_FPS, PROFILE_UI_FPS)

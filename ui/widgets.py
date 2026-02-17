@@ -124,15 +124,15 @@ class CameraWidget(QtWidgets.QWidget):
         self.placeholder_text = placeholder_text
         self.settings_mode = settings_mode
         self.night_mode_enabled = False
-        self.brightness = 1.0  # 1.0 = normal, >1.0 = brighter
+        self.brightness = 1.0  # Brightness multiplier: 1.0 = default, <1.0 = darker, >1.0 = brighter
 
-        # Visual styles for normal and swap-ready state
+        # Normal state: solid black background; Swap state: yellow border for visual feedback
         self.normal_style = "background: black;"
         self.swap_ready_style = "border: 6px solid #FFFF00; background: black;"
         self.setStyleSheet(self.normal_style)
         self.setObjectName(self.widget_id)
 
-        # Video display label or settings title
+        # QLabel displays video frames or placeholder text; touch events enabled for interaction
         self.video_label = QtWidgets.QLabel(self)
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setScaledContents(True)
@@ -147,19 +147,20 @@ class CameraWidget(QtWidgets.QWidget):
             QtCore.Qt.WidgetAttribute.WA_AcceptTouchEvents, True
         )
 
+        # Zero margins/spacing creates seamless grid layout with no borders between tiles
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)  # No margin to remove border separation
-        self._layout = layout  # Store reference for swap mode margin changes
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._layout = layout  # Reference for swap mode margin changes
 
-        # Settings tile uses clickable areas instead of buttons (more reliable for touch)
+        # Settings tile provides controls: Restart, Nightmode toggle, and Brightness adjustment
         if self.settings_mode:
-            self.video_label.setText("")  # Remove "SETTINGS" text
-            self.video_label.setFixedSize(0, 0)  # Hide completely
+            self.video_label.setText("")  # Hide placeholder text
+            self.video_label.setFixedSize(0, 0)  # Remove from layout
 
-            # Match button style for all settings labels
+            # Styled QLabels act as touch-friendly buttons
             btn_style = "QLabel { padding: 8px 12px; margin: 2px; background: #333; color: white; border-radius: 4px; }"
 
-            # Store callbacks for dynamic button creation
+            # Map object names to callbacks for event handling
             self._label_buttons = {}
 
             def add_setting_button(text: str, callback):
@@ -175,14 +176,14 @@ class CameraWidget(QtWidgets.QWidget):
             night_mode_label = add_setting_button("Nightmode: Off", on_night_mode_toggle)
             self.night_mode_button = night_mode_label
 
-            # Brightness buttons
+            # Brightness adjustment: 5 levels from dim to max
             brightness_layout = QtWidgets.QHBoxLayout()
             brightness_layout.setSpacing(4)
             self._brightness_buttons = {}
             brightness_values = [15, 60, 80, 100, 150]
             brightness_labels = ["15%", "60%", "80%", "100%", "150%"]
 
-            # Store brightness callback for external setting
+            # Propagate brightness changes to all camera widgets
             self._on_brightness_change = on_brightness_change
 
             def brightness_callback(v):
@@ -198,18 +199,18 @@ class CameraWidget(QtWidgets.QWidget):
                 btn.installEventFilter(self)
                 btn.setObjectName(f"brightness_{val}")
                 self._brightness_buttons[val] = btn
-                # Add to label_buttons dict with callback
+                # Map button to callback for touch handling
                 self._label_buttons[btn.objectName()] = lambda v=val, cb=brightness_callback: cb(v)
                 brightness_layout.addWidget(btn)
 
             self._current_brightness = 100
 
-            # Add brightness label above buttons
+            # Header label above brightness buttons
             brightness_label = QtWidgets.QLabel("Brightness")
             brightness_label.setStyleSheet("color: white; padding: 4px; font-weight: bold;")
             brightness_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-            # Left: Restart, below it Nightmode, below that brightness buttons
+            # Vertical layout: Restart → Nightmode → Brightness controls
             left_layout = QtWidgets.QVBoxLayout()
             left_layout.addWidget(restart_label, alignment=Qt.AlignmentFlag.AlignCenter)
             left_layout.addSpacing(8)
@@ -219,13 +220,13 @@ class CameraWidget(QtWidgets.QWidget):
             brightness_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
             left_layout.addLayout(brightness_layout)
 
-            # Horizontal: centered
+            # Center everything in the settings tile
             main_layout = QtWidgets.QHBoxLayout()
             main_layout.addStretch(1)
             main_layout.addLayout(left_layout, stretch=1)
             main_layout.addStretch(1)
 
-            # Add layouts
+            # Final layout stack
             layout.addStretch(1)
             layout.addLayout(main_layout)
             layout.addStretch(1)
@@ -389,8 +390,8 @@ class CameraWidget(QtWidgets.QWidget):
         logging.info("Attached camera %s to widget %s", stream_link, self.widget_id)
 
     def eventFilter(self, a0: QtCore.QObject, a1: QtCore.QEvent) -> bool:  # type: ignore[override]
-        """Handle touch and mouse events from widget or label."""
-        # Handle settings tile label buttons - check if this label is in our buttons dict
+        """Route touch/click events to appropriate handlers: settings buttons or camera widgets."""
+        # Settings tile: handle touch/click on Restart, Nightmode, and Brightness buttons
         if self.settings_mode and isinstance(a0, QtWidgets.QLabel):
             obj_name = a0.objectName()
             if obj_name in self._label_buttons:
@@ -413,7 +414,7 @@ class CameraWidget(QtWidgets.QWidget):
                         callback()
                     return True
 
-        # Let QPushButton pass through
+        # Allow standard button event processing
         if isinstance(a0, QtWidgets.QPushButton):
             return super().eventFilter(a0, a1)
 
@@ -1038,30 +1039,29 @@ class CameraWidget(QtWidgets.QWidget):
             self.night_mode_button.setText(label)
 
     def set_brightness(self, value: float) -> None:
-        """Set brightness multiplier (1.0 = normal, >1.0 = brighter)."""
+        """Apply brightness multiplier to camera output (1.0 = default, <1.0 = darker, >1.0 = brighter)."""
         self.brightness = max(0.5, min(3.0, value))
-        # Recompute brightness LUT
-        # Map input [0,255] to output range based on brightness factor
+        # Pre-compute LUT for efficient per-pixel brightness adjustment
         input_vals = np.arange(256, dtype=np.float32)
         if self.brightness < 1.0:
-            # Darker: map [0,255] to [0, 255 * brightness] (squash the range)
+            # Darker: squash the input range to a smaller output range
             max_out = 255 * self.brightness
             self._brightness_lut = (input_vals * (max_out / 255.0)).astype(np.uint8)
         else:
-            # Brighter: use simple multiplication with ceiling clamp
+            # Brighter: amplify then clamp to prevent overflow
             self._brightness_lut = np.clip(input_vals * self.brightness, 0, 255).astype(np.uint8)
-        # Update button highlights
+        # Highlight selected button
         self._update_brightness_buttons()
 
     def _set_brightness_value(self, value: int) -> None:
-        """Handle brightness button click."""
+        """Convert percentage value (15-150) to brightness factor and apply."""
         self._current_brightness = value
         brightness_factor = value / 100.0
         self.set_brightness(brightness_factor)
         self._update_brightness_buttons()
 
     def _update_brightness_buttons(self) -> None:
-        """Update brightness button styling to show selected."""
+        """Highlight the currently selected brightness level."""
         if not hasattr(self, '_brightness_buttons'):
             return
         btn_style = "QLabel { padding: 8px 12px; margin: 2px; background: #333; color: white; border-radius: 4px; }"
