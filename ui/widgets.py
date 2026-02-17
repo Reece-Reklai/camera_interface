@@ -87,6 +87,7 @@ class CameraWidget(QtWidgets.QWidget):
         settings_mode: bool = False,
         on_restart: Optional[Callable[[], None]] = None,
         on_night_mode_toggle: Optional[Callable[[], None]] = None,
+        on_brightness_change: Optional[Callable[[int], None]] = None,
     ) -> None:
         """Initialize tile UI, worker thread, and timers."""
         super().__init__(parent)
@@ -123,9 +124,10 @@ class CameraWidget(QtWidgets.QWidget):
         self.placeholder_text = placeholder_text
         self.settings_mode = settings_mode
         self.night_mode_enabled = False
+        self.brightness = 1.0  # 1.0 = normal, >1.0 = brighter
 
         # Visual styles for normal and swap-ready state
-        self.normal_style = "border: 2px solid #555; background: black;"
+        self.normal_style = "background: black;"
         self.swap_ready_style = "border: 6px solid #FFFF00; background: black;"
         self.setStyleSheet(self.normal_style)
         self.setObjectName(self.widget_id)
@@ -146,22 +148,23 @@ class CameraWidget(QtWidgets.QWidget):
         )
 
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(2, 2, 2, 2)  # Small margin to show border
+        layout.setContentsMargins(0, 0, 0, 0)  # No margin to remove border separation
         self._layout = layout  # Store reference for swap mode margin changes
 
         # Settings tile uses clickable areas instead of buttons (more reliable for touch)
         if self.settings_mode:
-            self.video_label.setText(self.placeholder_text or "SETTINGS")
-            self.video_label.setStyleSheet("color: #ffffff; font-size: 20px;")
+            self.video_label.setText("")  # Remove "SETTINGS" text
+            self.video_label.setFixedSize(0, 0)  # Hide completely
 
-            label_style = "QLabel { padding: 10px; }"
+            # Match button style for all settings labels
+            btn_style = "QLabel { padding: 8px 12px; margin: 2px; background: #333; color: white; border-radius: 4px; }"
 
             # Store callbacks for dynamic button creation
             self._label_buttons = {}
 
             def add_setting_button(text: str, callback):
                 label = QtWidgets.QLabel(text)
-                label.setStyleSheet(label_style)
+                label.setStyleSheet(btn_style)
                 label.setAttribute(QtCore.Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
                 label.installEventFilter(self)
                 label.setObjectName(f"btn_{text}")
@@ -170,17 +173,55 @@ class CameraWidget(QtWidgets.QWidget):
 
             restart_label = add_setting_button("Restart", on_restart)
             night_mode_label = add_setting_button("Nightmode: Off", on_night_mode_toggle)
-            exit_label = add_setting_button("Exit", self._exit_app)
             self.night_mode_button = night_mode_label
 
+            # Brightness buttons (15, 60, 80, 100)
+            brightness_layout = QtWidgets.QHBoxLayout()
+            brightness_layout.setSpacing(4)
+            self._brightness_buttons = {}
+            brightness_values = [15, 60, 80, 100]
+            brightness_labels = ["Dark", "Dim", "Bright", "Normal"]
+
+            # Store brightness callback for external setting
+            self._on_brightness_change = on_brightness_change
+
+            def brightness_callback(v):
+                self._set_brightness_value(v)
+                if self._on_brightness_change:
+                    self._on_brightness_change(v)
+
+            for val, label in zip(brightness_values, brightness_labels):
+                btn = QtWidgets.QLabel(label)
+                btn = QtWidgets.QLabel(label)
+                btn.setStyleSheet(btn_style)
+                btn.setAttribute(QtCore.Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
+                btn.installEventFilter(self)
+                btn.setObjectName(f"brightness_{val}")
+                self._brightness_buttons[val] = btn
+                # Add to label_buttons dict with callback
+                self._label_buttons[btn.objectName()] = lambda v=val, cb=brightness_callback: cb(v)
+                brightness_layout.addWidget(btn)
+
+            self._current_brightness = 100
+
+            # Left: Restart, below it Nightmode, below that brightness buttons
+            left_layout = QtWidgets.QVBoxLayout()
+            left_layout.addWidget(restart_label, alignment=Qt.AlignmentFlag.AlignCenter)
+            left_layout.addSpacing(8)
+            left_layout.addWidget(night_mode_label, alignment=Qt.AlignmentFlag.AlignCenter)
+            left_layout.addSpacing(8)
+            brightness_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            left_layout.addLayout(brightness_layout)
+
+            # Horizontal: centered
+            main_layout = QtWidgets.QHBoxLayout()
+            main_layout.addStretch(1)
+            main_layout.addLayout(left_layout, stretch=1)
+            main_layout.addStretch(1)
+
+            # Add layouts
             layout.addStretch(1)
-            layout.addWidget(self.video_label)
-            layout.addSpacing(6)
-            layout.addWidget(restart_label, alignment=Qt.AlignmentFlag.AlignCenter)
-            layout.addSpacing(4)
-            layout.addWidget(night_mode_label, alignment=Qt.AlignmentFlag.AlignCenter)
-            layout.addSpacing(4)
-            layout.addWidget(exit_label, alignment=Qt.AlignmentFlag.AlignCenter)
+            layout.addLayout(main_layout)
             layout.addStretch(1)
         else:
             layout.addWidget(self.video_label)
@@ -211,6 +252,8 @@ class CameraWidget(QtWidgets.QWidget):
         self._night_bgr = None
         # Pre-computed LUT for night mode brightness (1.6x gain, clamped to 255)
         self._night_lut = np.clip(np.arange(256, dtype=np.float32) * 1.6, 0, 255).astype(np.uint8)
+        # Brightness LUT - computed dynamically based on brightness setting
+        self._brightness_lut = np.arange(256, dtype=np.uint8)  # identity by default
 
         # Base FPS is the desired target; current FPS is adjusted dynamically.
         self.base_target_fps = target_fps
@@ -715,6 +758,22 @@ class CameraWidget(QtWidgets.QWidget):
                 except Exception:
                     logging.debug("Night mode processing failed", exc_info=True)
 
+            # Apply brightness adjustment (if not 1.0)
+            if self.brightness != 1.0:
+                try:
+                    if frame_bgr.ndim == 2:
+                        temp = np.empty_like(frame_bgr)
+                        cv2.LUT(frame_bgr, self._brightness_lut, dst=temp)
+                        frame_bgr = temp
+                    else:
+                        # Apply to each channel
+                        for i in range(3):
+                            temp = np.empty_like(frame_bgr[:, :, i])
+                            cv2.LUT(frame_bgr[:, :, i], self._brightness_lut, dst=temp)
+                            frame_bgr[:, :, i] = temp
+                except Exception:
+                    logging.debug("Brightness processing failed", exc_info=True)
+
             # Convert numpy frame to Qt image, handling grayscale or BGR.
             # Ensure contiguous memory layout for direct buffer access (avoids copy).
             if not frame_bgr.flags['C_CONTIGUOUS']:
@@ -971,6 +1030,38 @@ class CameraWidget(QtWidgets.QWidget):
         if self.settings_mode and hasattr(self, "night_mode_button"):
             label = "Nightmode: On" if enabled else "Nightmode: Off"
             self.night_mode_button.setText(label)
+
+    def set_brightness(self, value: float) -> None:
+        """Set brightness multiplier (1.0 = normal, >1.0 = brighter)."""
+        self.brightness = max(0.5, min(3.0, value))
+        # Recompute brightness LUT
+        # Map input [0,255] to output range based on brightness factor
+        input_vals = np.arange(256, dtype=np.float32)
+        if self.brightness < 1.0:
+            # Darker: map [0,255] to [0, 255 * brightness] (squash the range)
+            max_out = 255 * self.brightness
+            self._brightness_lut = (input_vals * (max_out / 255.0)).astype(np.uint8)
+        else:
+            # Brighter: use simple multiplication with ceiling clamp
+            self._brightness_lut = np.clip(input_vals * self.brightness, 0, 255).astype(np.uint8)
+        # Update button highlights
+        self._update_brightness_buttons()
+
+    def _set_brightness_value(self, value: int) -> None:
+        """Handle brightness button click."""
+        self._current_brightness = value
+        brightness_factor = value / 100.0
+        self.set_brightness(brightness_factor)
+        self._update_brightness_buttons()
+
+    def _update_brightness_buttons(self) -> None:
+        """Update brightness button styling to show selected."""
+        if not hasattr(self, '_brightness_buttons'):
+            return
+        btn_style = "QLabel { padding: 8px 12px; margin: 2px; background: #333; color: white; border-radius: 4px; }"
+        selected_style = "QLabel { padding: 8px 12px; margin: 2px; background: #666; color: white; border-radius: 4px; font-weight: bold; }"
+        for val, btn in self._brightness_buttons.items():
+            btn.setStyleSheet(selected_style if val == self._current_brightness else btn_style)
 
     def cleanup(self) -> None:
         """Stop the capture worker thread cleanly."""

@@ -101,8 +101,8 @@ def main() -> None:
     failed_indexes = {idx: time.time() for idx in (known_indexes - active_indexes)}
 
     layout = QtWidgets.QGridLayout(central_widget)
-    layout.setContentsMargins(10, 10, 10, 10)
-    layout.setSpacing(10)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(0)
 
     def restart_app():
         """Restart the entire process (used by settings tile)."""
@@ -127,6 +127,16 @@ def main() -> None:
                 w.set_night_mode(enabled)
         settings_tile.set_night_mode_button_label(enabled)
 
+    brightness_state = {"value": 1.0}
+
+    def set_brightness_all(value: int):
+        """Set brightness for all camera widgets."""
+        brightness_state["value"] = value / 100.0
+        logging.info("Brightness %d", value)
+        for w in all_widgets:
+            if hasattr(w, "set_brightness"):
+                w.set_brightness(brightness_state["value"])
+
     # Settings tile (always present, top-left)
     settings_tile = CameraWidget(
         width=1,
@@ -141,6 +151,7 @@ def main() -> None:
         settings_mode=True,
         on_restart=restart_app,
         on_night_mode_toggle=toggle_night_mode,
+        on_brightness_change=set_brightness_all,
     )
     all_widgets.append(settings_tile)
 
